@@ -429,7 +429,7 @@ impl TimeProvider for SystemClockTimeProvider {
 mod tests {
     use super::*;
     use crate::{
-        builder::{to_base64, NucTokenBuilder},
+        builder::{NucTokenBuilder, to_base64},
         envelope::from_base64,
         policy::{self},
         token::Did,
@@ -438,7 +438,7 @@ mod tests {
     use rstest::rstest;
     use serde::Serialize;
     use serde_json::json;
-    use serde_with::{serde_as, DisplayFromStr};
+    use serde_with::{DisplayFromStr, serde_as};
     use std::{env, ops::Deref, sync::LazyLock};
 
     static ROOT_SECRET_KEYS: LazyLock<Vec<SecretKey>> =

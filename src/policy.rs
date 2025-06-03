@@ -1,7 +1,7 @@
 use crate::selector::Selector;
 use serde::{
-    de::{Error, SeqAccess, Visitor},
     Deserialize, Deserializer, Serialize,
+    de::{Error, SeqAccess, Visitor},
 };
 use std::{collections::HashMap, fmt};
 
@@ -174,7 +174,7 @@ impl<'de> Visitor<'de> for PolicyVisitor {
 mod serialize {
     use super::{ConnectorPolicy, Operator, OperatorPolicy};
     use crate::selector::Selector;
-    use serde::{ser::SerializeSeq, Serialize};
+    use serde::{Serialize, ser::SerializeSeq};
 
     pub(super) fn serialize_operator_policy<S>(policy: &OperatorPolicy, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -333,7 +333,7 @@ pub(crate) mod op {
 mod tests {
     use super::*;
     use rstest::rstest;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[rstest]
     #[case::eq(json!(["==", ".foo", {"bar": 42}]), op::eq(".foo", json!({"bar": 42})))]
