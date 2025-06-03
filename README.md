@@ -1,6 +1,16 @@
 # nuc-rs
 
-A Rust crate to create and validate Nillion NUCs.
+A Rust crate to create and validate NUCs, the authentication mechanism used in [Nillion](https://nillion.com/)'s blind 
+modules.
+
+# Contributing
+
+In order to contribute, install [Rust](https://www.rust-lang.org/) and ensure all tests and lints pass by running:
+
+```bash
+cargo test
+cargo clippy
+```
 
 ## Test input generation
 
