@@ -131,7 +131,7 @@ pub enum SelectorParseError {
 mod tests {
     use super::*;
     use rstest::rstest;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[rstest]
     #[case::token_identity(".", &[], SelectorTarget::Token)]

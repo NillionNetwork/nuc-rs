@@ -1,5 +1,5 @@
 use crate::token::{NucToken, ProofHash};
-use base64::{display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD};
 use k256::ecdsa::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -260,7 +260,7 @@ pub(crate) fn from_base64(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 mod tests {
     use super::*;
     use crate::{
-        builder::{to_base64, NucTokenBuilder},
+        builder::{NucTokenBuilder, to_base64},
         policy,
         token::Did,
     };

@@ -3,7 +3,7 @@ use crate::{
     policy::Policy,
     token::{Command, Did, JsonObject, NucToken, TokenBody},
 };
-use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use serde::Serialize;
@@ -229,10 +229,10 @@ pub(crate) fn to_base64_json<T: Serialize>(input: &T) -> Result<String, serde_js
 mod tests {
     use super::*;
     use crate::{
-        envelope::{from_base64, NucTokenEnvelope},
+        envelope::{NucTokenEnvelope, from_base64},
         policy,
     };
-    use k256::{elliptic_curve::sec1::ToEncodedPoint, SecretKey};
+    use k256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
     use serde::de::DeserializeOwned;
     use serde_json::json;
 
