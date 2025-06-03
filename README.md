@@ -1,6 +1,6 @@
-# NUC
+# nuc-rs
 
-A crate to create and validate Nillion NUCs.
+A Rust crate to create and validate Nillion NUCs.
 
 ## Test input generation
 
