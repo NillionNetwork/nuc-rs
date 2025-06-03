@@ -18,5 +18,5 @@ signature = "2.2"
 thiserror = "2.0"
 
 [dev-dependencies]
-rstest = "0.21"
+rstest = { version = "0.25", default-features = false }
 serde_with = { version = "3.12", features = ["hex"] }
