@@ -63,25 +63,70 @@ pub struct NucToken {
     pub proofs: Vec<ProofHash>,
 }
 
+/// The DID type
+#[derive(Clone, Debug, Default, PartialEq)]
+#[cfg_attr(test, derive(serde::Serialize), serde(rename_all = "snake_case"))]
+pub enum DidType {
+    /// did:key:...
+    Key,
+
+    /// did:ethr:...
+    Ethr,
+
+    #[default]
+    /// did:nil:...
+    Nil,
+}
+
+impl std::fmt::Display for DidType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            DidType::Key => "key",
+            DidType::Ethr => "ethr",
+            DidType::Nil => "nil",
+        };
+        write!(f, "{}", s)
+    }
+}
+
+impl std::str::FromStr for DidType {
+    type Err = crate::token::ParseDidError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "key" => Ok(DidType::Key),
+            "ethr" => Ok(DidType::Ethr),
+            "nil" => Ok(DidType::Nil),
+            _ => Err(ParseDidError::InvalidMethod(s.to_string())),
+        }
+    }
+}
+
+// if (didString.startsWith("did:key:")) return key.parse(didString);
+// if (didString.startsWith("did:ethr:")) return ethr.parse(didString);
+// if (didString.startsWith("did:nil:")) return nil.parse(didString);
+
 /// A decentralized ID.
 #[derive(Clone, Debug, PartialEq, SerializeDisplay, DeserializeFromStr)]
 pub struct Did {
     /// The public key.
     pub public_key: [u8; 33],
+
+    /// The type of the DID: "key", "ethr", "nil".
+    pub method: DidType,
 }
 
 impl Did {
     /// Construct a new DID for the `nil` method.
-    pub fn new(public_key: [u8; 33]) -> Self {
-        Self { public_key }
+    pub fn new(public_key: [u8; 33], method: DidType) -> Self {
+        Self { public_key, method }
     }
 }
 
 impl fmt::Display for Did {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { public_key } = self;
+        let Self { public_key, method } = self;
         let public_key = hex::encode(public_key);
-        write!(f, "did:nil:{public_key}")
+        write!(f, "did:{method}:{public_key}")
     }
 }
 
@@ -89,10 +134,16 @@ impl FromStr for Did {
     type Err = ParseDidError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let raw_public_key = s.strip_prefix("did:nil:").ok_or(ParseDidError::NoDid)?;
+        // Expect format: did:<method>:<public_key>
+        let parts: Vec<&str> = s.split(':').collect();
+        if parts.len() != 3 || parts[0] != "did" {
+            return Err(ParseDidError::NoDid);
+        }
+        let method = parts[1].parse::<DidType>()?;
+        let raw_public_key = parts[2];
         let mut public_key = [0; 33];
         hex::decode_to_slice(raw_public_key, &mut public_key).map_err(ParseDidError::PublicKeyChars)?;
-        Ok(Self { public_key })
+        Ok(Self { public_key, method })
     }
 }
 
@@ -104,6 +155,9 @@ pub enum ParseDidError {
 
     #[error("invalid public key: {0}")]
     PublicKeyChars(FromHexError),
+
+    #[error("invalid method: {0}")]
+    InvalidMethod(String),
 }
 
 /// The hash of a proof.
@@ -313,9 +367,9 @@ mod tests {
 }"#;
         let token: NucToken = serde_json::from_str(input).expect("parsing failed");
         let expected = NucToken {
-            issuer: Did::new([0xaa; 33]),
-            audience: Did::new([0xbb; 33]),
-            subject: Did::new([0xcc; 33]),
+            issuer: Did::new([0xaa; 33], DidType::Nil),
+            audience: Did::new([0xbb; 33], DidType::Nil),
+            subject: Did::new([0xcc; 33], DidType::Nil),
             not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
             expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
             command: ["nil", "db", "read"].into(),
@@ -369,9 +423,9 @@ mod tests {
 }"#;
         let token: NucToken = serde_json::from_str(input).expect("parsing failed");
         let expected = NucToken {
-            issuer: Did::new([0xaa; 33]),
-            audience: Did::new([0xbb; 33]),
-            subject: Did::new([0xcc; 33]),
+            issuer: Did::new([0xaa; 33], DidType::Nil),
+            audience: Did::new([0xbb; 33], DidType::Nil),
+            subject: Did::new([0xcc; 33], DidType::Nil),
             not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
             expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
             command: ["nil", "db", "read"].into(),
