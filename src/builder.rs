@@ -246,8 +246,8 @@ mod tests {
     fn minimal_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
         NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::nil([0xbb; 33]))
-            .subject(Did::nil([0xcc; 33]))
+            .audience(Did::key([0xbb; 33]))
+            .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&key.into())
             .expect("build failed");
@@ -257,15 +257,15 @@ mod tests {
     fn extend_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let base = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::nil([0xbb; 33]))
-            .subject(Did::nil([0xcc; 33]))
+            .audience(Did::key([0xbb; 33]))
+            .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&key.clone().into())
             .expect("build failed");
         let base = NucTokenEnvelope::decode(&base).expect("decode failed").validate_signatures().unwrap();
         let next = NucTokenBuilder::extending(base.clone())
             .expect("extending failed")
-            .audience(Did::nil([0xdd; 33]))
+            .audience(Did::key([0xdd; 33]))
             .build(&key.into())
             .expect("build failed");
         let next = NucTokenEnvelope::decode(&next).expect("decode failed").validate_signatures().unwrap();
@@ -281,8 +281,8 @@ mod tests {
     fn encode_decode() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::nil([0xbb; 33]))
-            .subject(Did::nil([0xcc; 33]))
+            .audience(Did::key([0xbb; 33]))
+            .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .not_before(DateTime::from_timestamp(1740494955, 0).unwrap())
             .expires_at(DateTime::from_timestamp(1740495955, 0).unwrap())
@@ -303,8 +303,8 @@ mod tests {
         let issuer = Did::key(issuer);
         let expected = NucToken {
             issuer,
-            audience: Did::nil([0xbb; 33]),
-            subject: Did::nil([0xcc; 33]),
+            audience: Did::key([0xbb; 33]),
+            subject: Did::key([0xcc; 33]),
             not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
             expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
             command: ["nil", "db", "read"].into(),
@@ -321,8 +321,8 @@ mod tests {
         // Build a root NUC
         let root_key = SecretKey::random(&mut rand::thread_rng());
         let root = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::nil([0xbb; 33]))
-            .subject(Did::nil([0xcc; 33]))
+            .audience(Did::key([0xbb; 33]))
+            .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&root_key.into())
             .expect("build failed");
@@ -334,8 +334,8 @@ mod tests {
         // Build a delegation using the above proof
         let other_key = SecretKey::random(&mut rand::thread_rng());
         let delegation = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::nil([0xbb; 33]))
-            .subject(Did::nil([0xcc; 33]))
+            .audience(Did::key([0xbb; 33]))
+            .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(root.clone())
             .build(&other_key.into())
@@ -353,8 +353,8 @@ mod tests {
         // Build an invocation using the above as proof.
         let yet_another_key = SecretKey::random(&mut rand::thread_rng());
         let invocation = NucTokenBuilder::invocation(json!({"foo": 42}).as_object().cloned().unwrap())
-            .audience(Did::nil([0xbb; 33]))
-            .subject(Did::nil([0xcc; 33]))
+            .audience(Did::key([0xbb; 33]))
+            .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(delegation.clone())
             .build(&yet_another_key.into())

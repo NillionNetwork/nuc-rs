@@ -9,7 +9,10 @@ const SECP256K1_PREFIX: [u8; 2] = [0xe7, 0x01];
 #[derive(Clone, Debug, PartialEq)]
 pub enum Did {
     /// The legacy `nil` method.
-    #[deprecated(since = "0.2.0", note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead.")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead."
+    )]
     Nil { public_key: [u8; 33] },
     /// The `key` method.
     Key { public_key: [u8; 33] },
@@ -17,7 +20,11 @@ pub enum Did {
 
 impl Did {
     /// Construct a new Did for the `nil` method.
-    #[deprecated(since = "0.2.0", note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead.")]
+    #[deprecated(
+        since = "0.2.0",
+        note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead."
+    )]
+    #[allow(deprecated)]
     pub fn nil(public_key: [u8; 33]) -> Self {
         Self::Nil { public_key }
     }
@@ -28,6 +35,7 @@ impl Did {
     }
 
     /// Returns the Did's public key.
+    #[allow(deprecated)]
     pub fn public_key(&self) -> &[u8; 33] {
         match self {
             Self::Nil { public_key } => public_key,
@@ -37,6 +45,7 @@ impl Did {
 }
 
 impl fmt::Display for Did {
+    #[allow(deprecated)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Did::Nil { public_key } => {
@@ -57,6 +66,7 @@ impl fmt::Display for Did {
 impl FromStr for Did {
     type Err = ParseDidError;
 
+    #[allow(deprecated)]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if let Some(s) = s.strip_prefix("did:nil:") {
             let mut public_key = [0; 33];
@@ -126,6 +136,7 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
+    #[allow(deprecated)]
     #[case::nil(
         "did:nil:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         Did::nil([0xaa; 33])
