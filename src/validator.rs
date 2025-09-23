@@ -1,7 +1,8 @@
 use crate::{
+    did::Did,
     envelope::{DecodedNucToken, NucTokenEnvelope},
     policy::{ConnectorPolicy, Operator, OperatorPolicy, Policy},
-    token::{Did, NucToken, ProofHash, TokenBody},
+    token::{NucToken, ProofHash, TokenBody},
 };
 use chrono::{DateTime, Utc};
 use itertools::Itertools;
@@ -155,7 +156,7 @@ impl NucValidator {
             // The root issuer of this token is either the last proof issuer or the issuer of the
             // token itself.
             let root_issuer = &proofs.last().unwrap_or(&token).issuer;
-            if !root_keys.contains(root_issuer.public_key.as_slice()) {
+            if !root_keys.contains(root_issuer.public_key().as_slice()) {
                 return Err(ValidationError::Validation(ValidationKind::RootKeySignatureMissing));
             }
         }
@@ -430,9 +431,9 @@ mod tests {
     use super::*;
     use crate::{
         builder::{NucTokenBuilder, to_base64},
+        did::Did,
         envelope::from_base64,
         policy::{self},
-        token::Did,
     };
     use k256::SecretKey;
     use rstest::rstest;
@@ -466,7 +467,7 @@ mod tests {
                     let issuer_key: [u8; 33] = next.owner_key.public_key().to_sec1_bytes().deref().try_into().unwrap();
 
                     let previous = &mut builders[i];
-                    previous.builder = previous.builder.clone().audience(Did::new(issuer_key));
+                    previous.builder = previous.builder.clone().audience(Did::key(issuer_key));
                 }
             }
 
@@ -669,7 +670,7 @@ mod tests {
     impl DidExt for Did {
         fn from_secret_key(secret_key: &SecretKey) -> Self {
             let public_key: [u8; 33] = secret_key.public_key().to_sec1_bytes().deref().try_into().unwrap();
-            Did::new(public_key)
+            Did::key(public_key)
         }
     }
 
@@ -680,13 +681,13 @@ mod tests {
     // Create a delegation with the most common fields already set so we don't need to deal
     // with them in every single test.
     fn delegation(subject: &SecretKey) -> NucTokenBuilder {
-        NucTokenBuilder::delegation([]).audience(Did::new([0xde; 33])).subject(Did::from_secret_key(subject))
+        NucTokenBuilder::delegation([]).audience(Did::nil([0xde; 33])).subject(Did::from_secret_key(subject))
     }
 
     // Same as the above but for invocations
     fn invocation(subject: &SecretKey) -> NucTokenBuilder {
         NucTokenBuilder::invocation(Default::default())
-            .audience(Did::new([0xde; 33]))
+            .audience(Did::nil([0xde; 33]))
             .subject(Did::from_secret_key(subject))
     }
 
@@ -771,7 +772,7 @@ mod tests {
     fn issuer_audience_mismatch() {
         let key = secret_key();
         let base = delegation(&key).command(["nil"]);
-        let root = base.clone().audience(Did::new([0xaa; 33])).issued_by_root();
+        let root = base.clone().audience(Did::nil([0xaa; 33])).issued_by_root();
         let last = base.issued_by(key);
         let envelope = Chainer { chain_issuer_audience: false }.chain([root, last]);
         Asserter::default().assert_failure(envelope, ValidationKind::IssuerAudienceMismatch);
@@ -780,8 +781,8 @@ mod tests {
     #[test]
     fn invalid_audience_invocation() {
         let key = secret_key();
-        let expected_did = Did::new([0xaa; 33]);
-        let actual_did = Did::new([0xbb; 33]);
+        let expected_did = Did::nil([0xaa; 33]);
+        let actual_did = Did::nil([0xbb; 33]);
         let root = delegation(&key).command(["nil"]).issued_by_root();
         let last = invocation(&key).command(["nil"]).audience(actual_did).issued_by(key);
         let envelope = Chainer::default().chain([root, last]);
@@ -815,8 +816,8 @@ mod tests {
     #[test]
     fn invalid_audience_delegation() {
         let key = secret_key();
-        let expected_did = Did::new([0xaa; 33]);
-        let actual_did = Did::new([0xbb; 33]);
+        let expected_did = Did::nil([0xaa; 33]);
+        let actual_did = Did::nil([0xbb; 33]);
         let root = delegation(&key).command(["nil"]).issued_by_root();
         let last = delegation(&key).command(["nil"]).audience(actual_did).issued_by(key);
         let envelope = Chainer::default().chain([root, last]);
@@ -845,7 +846,7 @@ mod tests {
         let last = invocation(&key).command(["nil"]).issued_by(key);
         let envelope = Chainer::default().chain([root, last]);
         let parameters = ValidationParameters {
-            token_requirements: TokenTypeRequirements::Delegation(Did::new([0xaa; 33])),
+            token_requirements: TokenTypeRequirements::Delegation(Did::nil([0xaa; 33])),
             ..Default::default()
         };
         Asserter::new(parameters).assert_failure(envelope, ValidationKind::NeedDelegation);
@@ -859,7 +860,7 @@ mod tests {
         let last = base.issued_by(key);
         let envelope = Chainer::default().chain([root, last]);
         let parameters = ValidationParameters {
-            token_requirements: TokenTypeRequirements::Invocation(Did::new([0xaa; 33])),
+            token_requirements: TokenTypeRequirements::Invocation(Did::nil([0xaa; 33])),
             ..Default::default()
         };
         Asserter::new(parameters).assert_failure(envelope, ValidationKind::NeedInvocation);
@@ -915,7 +916,7 @@ mod tests {
             .issued_by_root();
         let invocation = NucTokenBuilder::invocation(json!({"bar": 1337}).as_object().cloned().unwrap())
             .subject(subject)
-            .audience(Did::new([0xaa; 33]))
+            .audience(Did::nil([0xaa; 33]))
             .command(["nil"])
             .issued_by(key);
 
@@ -934,7 +935,7 @@ mod tests {
             .issued_by(subject_key);
         let invocation = NucTokenBuilder::invocation(json!({"bar": 1337}).as_object().cloned().unwrap())
             .subject(subject)
-            .audience(Did::new([0xaa; 33]))
+            .audience(Did::nil([0xaa; 33]))
             .command(["nil"])
             .issued_by(secret_key());
 
@@ -991,7 +992,7 @@ mod tests {
             .issued_by_root();
         let last = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
             .subject(subject)
-            .audience(Did::new([0xaa; 33]))
+            .audience(Did::nil([0xaa; 33]))
             .command(["nil"])
             .issued_by(key);
 
@@ -1052,7 +1053,7 @@ mod tests {
     fn valid_token() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
         let subject = Did::from_secret_key(&subject_key);
-        let rpc_did = Did::new([0xaa; 33]);
+        let rpc_did = Did::nil([0xaa; 33]);
         let root = NucTokenBuilder::delegation([
             policy::op::eq(".args.foo", json!(42)),
             policy::op::eq("$.req.bar", json!(1337)),
@@ -1090,7 +1091,7 @@ mod tests {
     fn valid_revocation_token() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
         let subject = Did::from_secret_key(&subject_key);
-        let rpc_did = Did::new([0xaa; 33]);
+        let rpc_did = Did::nil([0xaa; 33]);
         let root = NucTokenBuilder::delegation([policy::op::eq(".args.foo", json!(42))])
             .subject(subject.clone())
             .command(["nil"])

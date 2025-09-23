@@ -1,7 +1,8 @@
 use crate::{
+    did::Did,
     envelope::{DecodedNucToken, JwtAlgorithm, JwtHeader, NucTokenEnvelope, SignaturesValidated},
     policy::Policy,
-    token::{Command, Did, JsonObject, NucToken, TokenBody},
+    token::{Command, JsonObject, NucToken, TokenBody},
 };
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
@@ -155,7 +156,7 @@ impl NucTokenBuilder {
         let public_key = VerifyingKey::from(issuer_key);
         let public_key =
             public_key.to_sec1_bytes().deref().try_into().map_err(|_| NucTokenBuildError::IssuerPublicKey)?;
-        let issuer = Did::new(public_key);
+        let issuer = Did::key(public_key);
         let mut token =
             NucToken { issuer, audience, subject, not_before, expires_at, command, body, meta, nonce, proofs: vec![] };
 
@@ -245,8 +246,8 @@ mod tests {
     fn minimal_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
         NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&key.into())
             .expect("build failed");
@@ -256,15 +257,15 @@ mod tests {
     fn extend_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let base = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&key.clone().into())
             .expect("build failed");
         let base = NucTokenEnvelope::decode(&base).expect("decode failed").validate_signatures().unwrap();
         let next = NucTokenBuilder::extending(base.clone())
             .expect("extending failed")
-            .audience(Did::new([0xdd; 33]))
+            .audience(Did::nil([0xdd; 33]))
             .build(&key.into())
             .expect("build failed");
         let next = NucTokenEnvelope::decode(&next).expect("decode failed").validate_signatures().unwrap();
@@ -280,8 +281,8 @@ mod tests {
     fn encode_decode() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .not_before(DateTime::from_timestamp(1740494955, 0).unwrap())
             .expires_at(DateTime::from_timestamp(1740495955, 0).unwrap())
@@ -299,11 +300,11 @@ mod tests {
         let nuc = token.next().expect("no token");
         let nuc: NucToken = from_base64_json(nuc);
         let issuer: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
-        let issuer = Did::new(issuer);
+        let issuer = Did::key(issuer);
         let expected = NucToken {
             issuer,
-            audience: Did::new([0xbb; 33]),
-            subject: Did::new([0xcc; 33]),
+            audience: Did::nil([0xbb; 33]),
+            subject: Did::nil([0xcc; 33]),
             not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
             expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
             command: ["nil", "db", "read"].into(),
@@ -320,8 +321,8 @@ mod tests {
         // Build a root NUC
         let root_key = SecretKey::random(&mut rand::thread_rng());
         let root = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&root_key.into())
             .expect("build failed");
@@ -333,8 +334,8 @@ mod tests {
         // Build a delegation using the above proof
         let other_key = SecretKey::random(&mut rand::thread_rng());
         let delegation = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(root.clone())
             .build(&other_key.into())
@@ -352,8 +353,8 @@ mod tests {
         // Build an invocation using the above as proof.
         let yet_another_key = SecretKey::random(&mut rand::thread_rng());
         let invocation = NucTokenBuilder::invocation(json!({"foo": 42}).as_object().cloned().unwrap())
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(delegation.clone())
             .build(&yet_another_key.into())

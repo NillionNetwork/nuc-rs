@@ -210,7 +210,7 @@ impl DecodedNucToken {
         let payload = Base64Display::new(&self.raw.payload, &BASE64_URL_SAFE_NO_PAD);
         let input = format!("{header}.{payload}");
 
-        let verifying_key = VerifyingKey::from_sec1_bytes(&self.token.issuer.public_key)
+        let verifying_key = VerifyingKey::from_sec1_bytes(self.token.issuer.public_key())
             .map_err(|_| InvalidSignature::IssuerPublicKey)?;
         let k256_signature =
             Signature::try_from(self.raw.signature.as_slice()).map_err(|_| InvalidSignature::Signature)?;
@@ -261,8 +261,8 @@ mod tests {
     use super::*;
     use crate::{
         builder::{NucTokenBuilder, to_base64},
+        did::Did,
         policy,
-        token::Did,
     };
     use k256::SecretKey;
     use rstest::rstest;
@@ -275,8 +275,8 @@ mod tests {
     fn decoding() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let encoded = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&key.into())
             .expect("build failed");
@@ -288,8 +288,8 @@ mod tests {
     fn invalid_signature() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&key.into())
             .expect("build failed");
@@ -359,8 +359,8 @@ mod tests {
             policy = policy::op::not(policy);
         }
         let encoded = NucTokenBuilder::delegation(vec![policy])
-            .audience(Did::new([0xbb; 33]))
-            .subject(Did::new([0xcc; 33]))
+            .audience(Did::nil([0xbb; 33]))
+            .subject(Did::nil([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&key.into())
             .expect("build failed");
