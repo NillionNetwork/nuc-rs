@@ -156,7 +156,19 @@ impl NucValidator {
             // The root issuer of this token is either the last proof issuer or the issuer of the
             // token itself.
             let root_issuer = &proofs.last().unwrap_or(&token).issuer;
-            if !root_keys.contains(root_issuer.public_key().as_slice()) {
+
+            // Check the root issuer's public key is in the set of allowed root keys
+            let root_key_found = match root_issuer {
+                #[allow(deprecated)]
+                Did::Nil { public_key } => root_keys.contains(public_key.as_slice()),
+                Did::Key { public_key } => root_keys.contains(public_key.as_slice()),
+                Did::Ethr { .. } => {
+                    // TODO - don't validate against root keys yet
+                    false
+                }
+            };
+
+            if !root_key_found {
                 return Err(ValidationError::Validation(ValidationKind::RootKeySignatureMissing));
             }
         }
@@ -644,7 +656,9 @@ mod tests {
 
     impl Builder {
         fn build(self) -> String {
-            self.builder.build(&self.owner_key.into()).expect("failed to build")
+            let pk: [u8; 33] = self.owner_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+            let issuer = Did::key(pk);
+            self.builder.build(issuer, &self.owner_key.into()).expect("failed to build")
         }
     }
 
@@ -681,14 +695,14 @@ mod tests {
     // Create a delegation with the most common fields already set so we don't need to deal
     // with them in every single test.
     fn delegation(subject: &SecretKey) -> NucTokenBuilder {
-        NucTokenBuilder::delegation([]).audience(Did::key([0xde; 33])).subject(Did::from_secret_key(subject))
+        let subject_pk: [u8; 33] = subject.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        NucTokenBuilder::delegation([]).audience(Did::key([0xde; 33])).subject(Did::key(subject_pk))
     }
 
     // Same as the above but for invocations
     fn invocation(subject: &SecretKey) -> NucTokenBuilder {
-        NucTokenBuilder::invocation(Default::default())
-            .audience(Did::key([0xde; 33]))
-            .subject(Did::from_secret_key(subject))
+        let subject_pk: [u8; 33] = subject.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        NucTokenBuilder::invocation(Default::default()).audience(Did::key([0xde; 33])).subject(Did::key(subject_pk))
     }
 
     #[rstest]
@@ -909,7 +923,8 @@ mod tests {
     #[test]
     fn root_policy_not_met() {
         let key = secret_key();
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
             .subject(subject.clone())
             .command(["nil"])
@@ -927,7 +942,8 @@ mod tests {
     #[test]
     fn last_policy_not_met() {
         let subject_key = secret_key();
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([]).subject(subject.clone()).command(["nil"]).issued_by_root();
         let intermediate = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
             .subject(subject.clone())
@@ -951,7 +967,8 @@ mod tests {
             policy = policy::op::not(policy);
         }
         let key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([policy]).subject(subject.clone()).command(["nil"]).issued_by_root();
         let tail = delegation(&key).command(["nil"]).issued_by(key);
 
@@ -963,7 +980,8 @@ mod tests {
     fn policy_array_too_wide() {
         let policy = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
         let key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation(policy).subject(subject.clone()).command(["nil"]).issued_by_root();
         let tail = delegation(&key).command(["nil"]).issued_by(key);
         let envelope = Chainer::default().chain([root, tail]);
@@ -975,7 +993,8 @@ mod tests {
         let policy = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
         let policy = policy::op::and(policy);
         let key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([policy]).subject(subject.clone()).command(["nil"]).issued_by_root();
         let tail = delegation(&key).command(["nil"]).issued_by(key);
         let envelope = Chainer::default().chain([root, tail]);
@@ -985,7 +1004,8 @@ mod tests {
     #[test]
     fn proofs_must_be_delegations() {
         let key = secret_key();
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::invocation(json!({"bar": 1337}).as_object().cloned().unwrap())
             .subject(subject.clone())
             .command(["nil"])
@@ -1052,7 +1072,8 @@ mod tests {
     #[test]
     fn valid_token() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let rpc_did = Did::key([0xaa; 33]);
         let root = NucTokenBuilder::delegation([
             policy::op::eq(".args.foo", json!(42)),
@@ -1080,17 +1101,20 @@ mod tests {
         let context = HashMap::from([("req", json!({"bar": 1337}))]);
         let ValidatedNucToken { token, proofs } =
             Asserter::new(parameters).with_context(context).assert_success(envelope);
-        assert_eq!(token.issuer, Did::from_secret_key(&invocation_key));
+        let invocation_issuer_pk: [u8; 33] = invocation_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        assert_eq!(token.issuer, Did::key(invocation_issuer_pk));
 
         // Ensure the order is right
         assert_eq!(proofs[0].issuer, subject);
-        assert_eq!(proofs[1].issuer, Did::from_secret_key(&ROOT_SECRET_KEYS[0]));
+        let root_issuer_pk: [u8; 33] = ROOT_SECRET_KEYS[0].public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        assert_eq!(proofs[1].issuer, Did::key(root_issuer_pk));
     }
 
     #[test]
     fn valid_revocation_token() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let rpc_did = Did::key([0xaa; 33]);
         let root = NucTokenBuilder::delegation([policy::op::eq(".args.foo", json!(42))])
             .subject(subject.clone())
@@ -1113,7 +1137,8 @@ mod tests {
     #[test]
     fn valid_no_root_keys_needed() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let token = NucTokenBuilder::delegation([])
             .subject(subject.clone())
             .audience(subject)

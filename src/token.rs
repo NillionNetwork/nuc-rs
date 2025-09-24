@@ -228,10 +228,9 @@ mod tests {
   "nonce": "beef"
 }"#;
         let token: NucToken = serde_json::from_str(input).expect("parsing failed");
-        assert_eq!(
-            token.issuer.public_key(),
-            b"\x02\x1a\xfa\xca\xde\x02\xde\xca\xff\xba\xbe\x10\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15"
-        );
+        // Check that the issuer is the expected did:key
+        let expected_issuer = Did::key(*b"\x02\x1a\xfa\xca\xde\x02\xde\xca\xff\xba\xbe\x10\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15");
+        assert_eq!(token.issuer, expected_issuer);
     }
 
     #[allow(deprecated)]
@@ -388,5 +387,104 @@ mod tests {
         let left = Command::from(left);
         let right = Command::from(right);
         assert_eq!(left.is_attenuation_of(&right), expected);
+    }
+}
+
+pub use eip712::Eip712NucPayload;
+
+pub mod eip712 {
+    use crate::token::{NucToken, TokenBody};
+    use ethers_core::types::{
+        H256,
+        transaction::eip712::{EIP712Domain, Eip712, Eip712DomainType, TypedData},
+    };
+    use serde::Serialize;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+
+    #[derive(Clone, Debug, Serialize)]
+    pub struct Eip712NucPayload {
+        pub iss: String,
+        pub aud: String,
+        pub sub: String,
+        pub cmd: String,
+        #[serde(serialize_with = "to_string")]
+        pub pol: Value,
+        #[serde(serialize_with = "to_string")]
+        pub args: Value,
+        pub nbf: u64,
+        pub exp: u64,
+        pub nonce: String,
+        pub prf: Vec<String>,
+    }
+
+    impl From<NucToken> for Eip712NucPayload {
+        fn from(token: NucToken) -> Self {
+            let (pol, args) = match token.body {
+                TokenBody::Delegation(policies) => {
+                    (serde_json::to_value(policies).unwrap(), Value::Object(Default::default()))
+                }
+                TokenBody::Invocation(args) => (Value::Array(Default::default()), serde_json::to_value(args).unwrap()),
+            };
+
+            Self {
+                iss: token.issuer.to_string(),
+                aud: token.audience.to_string(),
+                sub: token.subject.to_string(),
+                cmd: token.command.to_string(),
+                pol,
+                args,
+                nbf: token.not_before.map(|dt| dt.timestamp() as u64).unwrap_or(0),
+                exp: token.expires_at.map(|dt| dt.timestamp() as u64).unwrap_or(0),
+                nonce: hex::encode(token.nonce),
+                prf: token.proofs.into_iter().map(|p| p.to_string()).collect(),
+            }
+        }
+    }
+
+    impl Eip712NucPayload {
+        pub fn eip712_encode_data(&self) -> Result<H256, String> {
+            let mut types = BTreeMap::new();
+            types.insert(
+                "NucPayload".to_string(),
+                vec![
+                    Eip712DomainType { name: "iss".into(), r#type: "string".into() },
+                    Eip712DomainType { name: "aud".into(), r#type: "string".into() },
+                    Eip712DomainType { name: "sub".into(), r#type: "string".into() },
+                    Eip712DomainType { name: "cmd".into(), r#type: "string".into() },
+                    Eip712DomainType { name: "pol".into(), r#type: "string".into() },
+                    Eip712DomainType { name: "args".into(), r#type: "string".into() },
+                    Eip712DomainType { name: "nbf".into(), r#type: "uint256".into() },
+                    Eip712DomainType { name: "exp".into(), r#type: "uint256".into() },
+                    Eip712DomainType { name: "nonce".into(), r#type: "string".into() },
+                    Eip712DomainType { name: "prf".into(), r#type: "string[]".into() },
+                ],
+            );
+
+            let domain = EIP712Domain {
+                name: Some("NUC".into()),
+                version: Some("1".into()),
+                chain_id: Some(1u64.into()),
+                verifying_contract: None,
+                salt: None,
+            };
+
+            let message = serde_json::to_value(self)
+                .and_then(serde_json::from_value::<BTreeMap<String, Value>>)
+                .map_err(|e| e.to_string())?;
+
+            let typed_data = TypedData { domain, types, primary_type: "NucPayload".to_string(), message };
+
+            typed_data.encode_eip712().map(H256::from).map_err(|e| e.to_string())
+        }
+    }
+
+    fn to_string<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        T: Serialize,
+        S: serde::Serializer,
+    {
+        let s = serde_json::to_string(value).map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(&s)
     }
 }

@@ -1,6 +1,6 @@
 use crate::{
     did::Did,
-    envelope::{DecodedNucToken, JwtAlgorithm, JwtHeader, NucTokenEnvelope, SignaturesValidated},
+    envelope::{DecodedNucToken, NucAlgorithm, NucHeader, NucTokenEnvelope, NucType, SignaturesValidated},
     policy::Policy,
     token::{Command, JsonObject, NucToken, TokenBody},
 };
@@ -141,11 +141,38 @@ impl NucTokenBuilder {
     }
 
     /// Build a NUC token.
-    pub fn build(self, issuer_key: &SigningKey) -> Result<String, NucTokenBuildError> {
+    pub fn build(self, issuer: Did, issuer_key: &SigningKey) -> Result<String, NucTokenBuildError> {
         let Self { body, audience, subject, not_before, expires_at, command, meta, nonce, proof } = self;
         let audience = try_get!(audience)?;
         let subject = try_get!(subject)?;
         let command = try_get!(command)?;
+
+        // Verify that the issuer key matches the provided issuer Did
+        match &issuer {
+            #[allow(deprecated)]
+            Did::Nil { public_key } => {
+                let key_from_signer: [u8; 33] = VerifyingKey::from(issuer_key)
+                    .to_sec1_bytes()
+                    .deref()
+                    .try_into()
+                    .map_err(|_| NucTokenBuildError::IssuerPublicKey)?;
+                if &key_from_signer != public_key {
+                    return Err(NucTokenBuildError::IssuerKeyMismatch);
+                }
+            }
+            Did::Key { public_key } => {
+                let key_from_signer: [u8; 33] = VerifyingKey::from(issuer_key)
+                    .to_sec1_bytes()
+                    .deref()
+                    .try_into()
+                    .map_err(|_| NucTokenBuildError::IssuerPublicKey)?;
+                if &key_from_signer != public_key {
+                    return Err(NucTokenBuildError::IssuerKeyMismatch);
+                }
+            }
+            // TODO - implement when Signer trait added
+            Did::Ethr { .. } => return Err(NucTokenBuildError::UnsupportedIssuer),
+        }
 
         // Default to a 16 byte nonce if none is set.
         let nonce = match nonce.is_empty() {
@@ -153,10 +180,6 @@ impl NucTokenBuilder {
             false => nonce,
         };
 
-        let public_key = VerifyingKey::from(issuer_key);
-        let public_key =
-            public_key.to_sec1_bytes().deref().try_into().map_err(|_| NucTokenBuildError::IssuerPublicKey)?;
-        let issuer = Did::key(public_key);
         let mut token =
             NucToken { issuer, audience, subject, not_before, expires_at, command, body, meta, nonce, proofs: vec![] };
 
@@ -178,16 +201,29 @@ impl NucTokenBuilder {
         proofs: Vec<DecodedNucToken>,
     ) -> Result<String, NucTokenBuildError> {
         use NucTokenBuildError::*;
-        let header = JwtHeader { algorithm: JwtAlgorithm::Es256k };
+
+        let header = match token.issuer {
+            #[allow(deprecated)]
+            Did::Nil { .. } => NucHeader { typ: None, alg: NucAlgorithm::ES256K, ver: None, met: None },
+            Did::Key { .. } => NucHeader {
+                typ: Some(NucType::Nuc),
+                alg: NucAlgorithm::ES256K,
+                ver: Some("1.0.0".to_string()),
+                met: None,
+            },
+            // TODO - implement when Signer trait added
+            Did::Ethr { .. } => return Err(UnsupportedIssuer),
+        };
+
         let header = to_base64_json(&header).map_err(|e| EncodingHeader(e.to_string()))?;
-        let token = to_base64_json(&token).map_err(|e| EncodingToken(e.to_string()))?;
-        let mut output = format!("{header}.{token}");
+        let token_payload = to_base64_json(&token).map_err(|e| EncodingToken(e.to_string()))?;
+        let mut output = format!("{header}.{token_payload}");
         let signature: Signature = issuer_key.sign(output.as_bytes());
         output.push('.');
         output.push_str(&to_base64(signature.to_bytes()));
         for proof in proofs {
             output.push('/');
-            output.push_str(&proof.to_jwt());
+            output.push_str(&proof.to_nuc_str());
         }
         Ok(output)
     }
@@ -212,6 +248,12 @@ pub enum NucTokenBuildError {
 
     #[error("proof serializing: {0}")]
     ProofSerializing(serde_json::Error),
+
+    #[error("issuer signing key does not match the provided issuer Did")]
+    IssuerKeyMismatch,
+
+    #[error("the builder does not support creating tokens for this issuer type")]
+    UnsupportedIssuer,
 
     #[error("invalid issuer public key")]
     IssuerPublicKey,
@@ -245,28 +287,31 @@ mod tests {
     #[test]
     fn minimal_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
+        let pk_bytes: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
         NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(&key.into())
+            .build(Did::key(pk_bytes), &key.into())
             .expect("build failed");
     }
 
     #[test]
     fn extend_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
+        let pk_bytes: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
+        let issuer = Did::key(pk_bytes);
         let base = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(&key.clone().into())
+            .build(issuer.clone(), &key.clone().into())
             .expect("build failed");
         let base = NucTokenEnvelope::decode(&base).expect("decode failed").validate_signatures().unwrap();
         let next = NucTokenBuilder::extending(base.clone())
             .expect("extending failed")
             .audience(Did::key([0xdd; 33]))
-            .build(&key.into())
+            .build(issuer, &key.into())
             .expect("build failed");
         let next = NucTokenEnvelope::decode(&next).expect("decode failed").validate_signatures().unwrap();
         let (token, proofs) = next.into_parts();
@@ -280,6 +325,9 @@ mod tests {
     #[test]
     fn encode_decode() {
         let key = SecretKey::random(&mut rand::thread_rng());
+        let issuer_pk: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
+        let issuer_did = Did::key(issuer_pk);
+
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
@@ -288,21 +336,20 @@ mod tests {
             .expires_at(DateTime::from_timestamp(1740495955, 0).unwrap())
             .nonce([1, 2, 3])
             .meta(json!({"name": "bob"}).as_object().cloned().unwrap())
-            .build(&(&key).into())
+            .build(issuer_did.clone(), &(&key).into())
             .expect("failed to build");
-        let mut token = token.split('.');
-        let header = token.next().expect("no header");
+        let mut token_parts = token.split('.');
+        let header = token_parts.next().expect("no header");
         let header = from_base64(header).unwrap();
 
         let header: serde_json::Value = serde_json::from_slice(&header).expect("invalid header");
-        assert_eq!(header, json!({"alg": "ES256K"}));
+        assert_eq!(header, json!({ "typ": "nuc", "alg": "ES256K", "ver": "1.0.0" }));
 
-        let nuc = token.next().expect("no token");
+        let nuc = token_parts.next().expect("no token");
         let nuc: NucToken = from_base64_json(nuc);
-        let issuer: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
-        let issuer = Did::key(issuer);
+
         let expected = NucToken {
-            issuer,
+            issuer: issuer_did,
             audience: Did::key([0xbb; 33]),
             subject: Did::key([0xcc; 33]),
             not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
@@ -320,11 +367,13 @@ mod tests {
     fn chain() {
         // Build a root NUC
         let root_key = SecretKey::random(&mut rand::thread_rng());
+        let root_pk: [u8; 33] = root_key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
+        let root_issuer = Did::key(root_pk);
         let root = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(&root_key.into())
+            .build(root_issuer, &root_key.into())
             .expect("build failed");
         let root = NucTokenEnvelope::decode(&root)
             .expect("decoding failed")
@@ -333,12 +382,14 @@ mod tests {
 
         // Build a delegation using the above proof
         let other_key = SecretKey::random(&mut rand::thread_rng());
+        let other_pk: [u8; 33] = other_key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
+        let other_issuer = Did::key(other_pk);
         let delegation = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(root.clone())
-            .build(&other_key.into())
+            .build(other_issuer, &other_key.into())
             .expect("build failed");
         let delegation = NucTokenEnvelope::decode(&delegation)
             .expect("decoding failed")
@@ -352,12 +403,15 @@ mod tests {
 
         // Build an invocation using the above as proof.
         let yet_another_key = SecretKey::random(&mut rand::thread_rng());
+        let yet_another_pk: [u8; 33] =
+            yet_another_key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
+        let yet_another_issuer = Did::key(yet_another_pk);
         let invocation = NucTokenBuilder::invocation(json!({"foo": 42}).as_object().cloned().unwrap())
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(delegation.clone())
-            .build(&yet_another_key.into())
+            .build(yet_another_issuer, &yet_another_key.into())
             .expect("build failed");
 
         let invocation = NucTokenEnvelope::decode(&invocation)
