@@ -13,9 +13,9 @@ use std::{iter, marker::PhantomData};
 
 const DEFAULT_MAX_RAW_TOKEN_SIZE: usize = 1024 * 10;
 
-/// An envelope for a NUC token.
+/// An envelope for a Nuc token.
 ///
-/// This contains the NUC token itself along with all of its proofs.
+/// This contains the Nuc token itself along with all of its proofs.
 #[derive(Clone, Debug)]
 pub struct NucTokenEnvelope<T = SignaturesUnvalidated> {
     token: DecodedNucToken,
@@ -24,7 +24,7 @@ pub struct NucTokenEnvelope<T = SignaturesUnvalidated> {
 }
 
 impl NucTokenEnvelope<SignaturesUnvalidated> {
-    /// Decode a NUC token.
+    /// Decode a Nuc token.
     ///
     /// This performs no integrity checks, and instead only ensures the token and its proofs are well formed.
     pub fn decode(s: &str) -> Result<Self, NucEnvelopeParseError> {
@@ -71,7 +71,7 @@ impl<T> NucTokenEnvelope<T> {
     }
 }
 
-/// A NUC token envelope decoder.
+/// A Nuc token envelope decoder.
 #[derive(Debug)]
 pub struct NucEnvelopeDecoder {
     /// The maximum raw token size, in bytes.
@@ -85,7 +85,7 @@ impl Default for NucEnvelopeDecoder {
 }
 
 impl NucEnvelopeDecoder {
-    /// Decode a NUC.
+    /// Decode a Nuc.
     pub fn decode(&self, s: &str) -> Result<NucTokenEnvelope, NucEnvelopeParseError> {
         if s.len() > self.max_raw_token_size {
             return Err(NucEnvelopeParseError::NucTooLarge(self.max_raw_token_size));
@@ -112,7 +112,7 @@ pub struct SignaturesValidated;
 #[derive(Clone, Debug)]
 pub struct SignaturesUnvalidated;
 
-/// An error when parsing a NUC envelope.
+/// An error when parsing a Nuc envelope.
 #[derive(Debug, thiserror::Error)]
 pub enum NucEnvelopeParseError {
     #[error("empty input")]
@@ -125,7 +125,7 @@ pub enum NucEnvelopeParseError {
     Nuc(#[from] NucParseError),
 }
 
-/// A raw NUC token.
+/// A raw Nuc token.
 ///
 /// This contains the raw parts that were serialized from a Nuc and is used to have access to the
 /// original unmodified
@@ -162,7 +162,7 @@ impl RawNuc {
     }
 }
 
-/// An error when parsing a NUC.
+/// An error when parsing a Nuc.
 #[derive(Debug, thiserror::Error)]
 pub enum NucParseError {
     #[error("no {0} component in nuc")]
@@ -175,9 +175,9 @@ pub enum NucParseError {
     Json(&'static str, serde_json::Error),
 }
 
-/// A decoded NUC token.
+/// A decoded Nuc token.
 ///
-/// This is a wrapper over a NUC token along with its raw pieces to be able to re-serialize it
+/// This is a wrapper over a Nuc token along with its raw pieces to be able to re-serialize it
 /// later on without altering its contents.
 #[derive(Clone, Debug)]
 pub struct DecodedNucToken {
@@ -210,6 +210,9 @@ impl DecodedNucToken {
     }
 
     /// Validate the signature in this token.
+    ///
+    /// This validates the signature for this single token only and does not
+    /// validate any proofs in the chain.
     pub(crate) fn validate_signature(&self) -> Result<(), InvalidSignature> {
         let header: NucHeader =
             serde_json::from_slice(&self.raw.header).map_err(|_| InvalidSignature::InvalidHeader)?;
@@ -262,7 +265,7 @@ impl DecodedNucToken {
         Ok(())
     }
 
-    /// Get the NUC token.
+    /// Get the Nuc token.
     pub fn token(&self) -> &NucToken {
         &self.token
     }

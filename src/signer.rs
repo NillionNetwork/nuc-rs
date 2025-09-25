@@ -29,13 +29,13 @@ pub trait Signer {
     /// The DID of this signer.
     fn did(&self) -> &Did;
 
-    /// Sign a token.
+    /// Create and sign a Nuc for the given token.
     ///
-    /// Returns the header and signature for the token.
+    /// Returns the Nuc header and the resulting signature.
     async fn sign_token(&self, token: &NucToken) -> Result<(NucHeader, Vec<u8>), SigningError>;
 }
 
-/// An error that can occur when signing a NUC token.
+/// An error that can occur when signing a Nuc token.
 #[derive(Debug, thiserror::Error)]
 pub enum SigningError {
     #[error("signing failed: {0}")]

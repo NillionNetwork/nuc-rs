@@ -17,7 +17,7 @@ macro_rules! try_get {
     };
 }
 
-/// A NUC token builder.
+/// A Nuc token builder.
 #[derive(Clone, Debug)]
 pub struct NucTokenBuilder {
     body: TokenBody,
@@ -139,7 +139,7 @@ impl NucTokenBuilder {
         self
     }
 
-    /// Build a NUC token.
+    /// Build a Nuc token.
     pub async fn build(self, signer: &impl Signer) -> Result<String, NucTokenBuildError> {
         let Self { body, audience, subject, not_before, expires_at, command, meta, nonce, proof } = self;
 

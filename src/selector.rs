@@ -20,7 +20,7 @@ enum SelectorTarget {
     Context,
 }
 
-/// A selector that can be applied to a NUC.
+/// A selector that can be applied to a Nuc.
 #[derive(Clone, Debug, PartialEq, SerializeDisplay, DeserializeFromStr)]
 pub struct Selector {
     labels: Vec<String>,

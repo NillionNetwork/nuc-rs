@@ -18,7 +18,7 @@ const MAX_POLICY_WIDTH: usize = 10;
 const MAX_POLICY_DEPTH: usize = 5;
 const REVOCATION_COMMAND: &[&str] = &["nuc", "revoke"];
 
-/// The result of validating a NUC token.
+/// The result of validating a Nuc token.
 pub type ValidationResult = Result<(), ValidationError>;
 
 /// Parameters to be used during validation.
@@ -64,20 +64,20 @@ pub enum TokenTypeRequirements {
     None,
 }
 
-/// A NUC validator.
+/// A Nuc validator.
 pub struct NucValidator {
     root_keys: HashSet<Box<[u8]>>,
     time_provider: Box<dyn TimeProvider>,
 }
 
 impl NucValidator {
-    /// Construct a new NUC validator.
+    /// Construct a new Nuc validator.
     pub fn new(root_keys: &[PublicKey]) -> Self {
         let root_keys = root_keys.iter().map(|pk| pk.to_sec1_bytes()).collect();
         Self { root_keys, time_provider: Box::new(SystemClockTimeProvider) }
     }
 
-    /// Validate a NUC.
+    /// Validate a Nuc.
     pub fn validate(
         &self,
         envelope: NucTokenEnvelope,
@@ -295,7 +295,7 @@ impl NucValidator {
     }
 }
 
-/// A validated NUC token along with its proofs.
+/// A validated Nuc token along with its proofs.
 #[derive(Debug)]
 pub struct ValidatedNucToken {
     /// The token.
