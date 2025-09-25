@@ -1,4 +1,5 @@
 pub mod builder;
+pub mod did;
 pub mod envelope;
 pub mod policy;
 pub mod selector;

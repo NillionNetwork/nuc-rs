@@ -1,3 +1,4 @@
+use crate::did::Did;
 use crate::policy::Policy;
 use chrono::{DateTime, Utc};
 use hex::FromHexError;
@@ -61,49 +62,6 @@ pub struct NucToken {
     /// The hash of the proofs in this token.
     #[serde(rename = "prf", default)]
     pub proofs: Vec<ProofHash>,
-}
-
-/// A decentralized ID.
-#[derive(Clone, Debug, PartialEq, SerializeDisplay, DeserializeFromStr)]
-pub struct Did {
-    /// The public key.
-    pub public_key: [u8; 33],
-}
-
-impl Did {
-    /// Construct a new DID for the `nil` method.
-    pub fn new(public_key: [u8; 33]) -> Self {
-        Self { public_key }
-    }
-}
-
-impl fmt::Display for Did {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { public_key } = self;
-        let public_key = hex::encode(public_key);
-        write!(f, "did:nil:{public_key}")
-    }
-}
-
-impl FromStr for Did {
-    type Err = ParseDidError;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let raw_public_key = s.strip_prefix("did:nil:").ok_or(ParseDidError::NoDid)?;
-        let mut public_key = [0; 33];
-        hex::decode_to_slice(raw_public_key, &mut public_key).map_err(ParseDidError::PublicKeyChars)?;
-        Ok(Self { public_key })
-    }
-}
-
-/// An error when parsing a DID.
-#[derive(Debug, thiserror::Error)]
-pub enum ParseDidError {
-    #[error("no 'did:nil:' prefix")]
-    NoDid,
-
-    #[error("invalid public key: {0}")]
-    PublicKeyChars(FromHexError),
 }
 
 /// The hash of a proof.
@@ -259,26 +217,32 @@ mod tests {
     }
 
     #[test]
-    fn parse_valid_did() {
-        let input = "did:nil:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let did: Did = input.parse().expect("parse failed");
-        assert_eq!(&did.public_key, b"\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa");
-        assert_eq!(did.to_string(), input);
-    }
-
-    #[rstest]
-    #[case::no_did("foo:bar:aa")]
-    #[case::no_method("did:bar")]
-    #[case::trailing_colon("did:bar:aa:")]
-    #[case::invalid_public_key("did:bar:lol")]
-    #[case::invalid_method("did:test:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
-    fn parse_invalid_did(#[case] input: &str) {
-        Did::from_str(input).expect_err("parse succeeded");
-    }
-
-    #[test]
-    fn parse_minimal_delegation() {
+    fn parse_did_key_token() {
         let input = r#"
+{
+  "iss": "did:key:zQ3shPE7AAuxa47pSKSz68iK64dEy6mx1g27Gwjaw294Q1XcY",
+  "aud": "did:key:zQ3shokFTS3dS2tPR6hL8WdG2a2h2nkr4zv4x1v6b34tMAu1Y",
+  "sub": "did:key:zQ3shPE7AAuxa47pSKSz68iK64dEy6mx1g27Gwjaw294Q1XcY",
+  "cmd": "/nil/db/read",
+  "pol": [],
+  "nonce": "beef"
+}"#;
+        let token: NucToken = serde_json::from_str(input).expect("parsing failed");
+        assert_eq!(
+            token.issuer.public_key(),
+            b"\x02\x1a\xfa\xca\xde\x02\xde\xca\xff\xba\xbe\x10\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15"
+        );
+    }
+
+    #[allow(deprecated)]
+    mod legacy {
+        use super::*;
+        use crate::did::Did;
+        use chrono::DateTime;
+
+        #[test]
+        fn parse_minimal_delegation() {
+            let input = r#"
 {
   "iss": "did:nil:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "aud": "did:nil:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -289,12 +253,12 @@ mod tests {
   ],
   "nonce": "beef"
 }"#;
-        serde_json::from_str::<NucToken>(input).expect("parsing failed");
-    }
+            serde_json::from_str::<NucToken>(input).expect("parsing failed");
+        }
 
-    #[test]
-    fn parse_full_delegation() {
-        let input = r#"
+        #[test]
+        fn parse_full_delegation() {
+            let input = r#"
 {
   "iss": "did:nil:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "aud": "did:nil:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -311,30 +275,31 @@ mod tests {
   "nonce": "beef",
   "prf": ["f4f04af6a832bcd8a6855df5d0242c9a71e9da17faeb2d33b30c8903f1b5a944"]
 }"#;
-        let token: NucToken = serde_json::from_str(input).expect("parsing failed");
-        let expected = NucToken {
-            issuer: Did::new([0xaa; 33]),
-            audience: Did::new([0xbb; 33]),
-            subject: Did::new([0xcc; 33]),
-            not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
-            expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
-            command: ["nil", "db", "read"].into(),
-            body: TokenBody::Delegation(vec![policy::op::eq(".foo", json!(42))]),
-            proofs: vec![ProofHash(*b"\xf4\xf0J\xf6\xa82\xbc\xd8\xa6\x85]\xf5\xd0$,\x9aq\xe9\xda\x17\xfa\xeb-3\xb3\x0c\x89\x03\xf1\xb5\xa9D")],
-            nonce: b"\xbe\xef".to_vec(),
-            meta: Some(json!({ "name": "bob" }).as_object().cloned().unwrap()),
-        };
-        assert_eq!(token, expected);
+            let token: NucToken = serde_json::from_str(input).expect("parsing failed");
+            #[allow(deprecated)]
+            let expected = NucToken {
+                issuer: Did::nil([0xaa; 33]),
+                audience: Did::nil([0xbb; 33]),
+                subject: Did::nil([0xcc; 33]),
+                not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
+                expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
+                command: ["nil", "db", "read"].into(),
+                body: TokenBody::Delegation(vec![policy::op::eq(".foo", json!(42))]),
+                proofs: vec![ProofHash(*b"\xf4\xf0J\xf6\xa82\xbc\xd8\xa6\x85]\xf5\xd0$,\x9aq\xe9\xda\x17\xfa\xeb-3\xb3\x0c\x89\x03\xf1\xb5\xa9D")],
+                nonce: b"\xbe\xef".to_vec(),
+                meta: Some(json!({ "name": "bob" }).as_object().cloned().unwrap()),
+            };
+            assert_eq!(token, expected);
 
-        // Ensure `token -> string -> token` gives us back the original token
-        let serialized = serde_json::to_string(&token).expect("serialize failed");
-        let deserialized: NucToken = serde_json::from_str(&serialized).expect("deserialize failed");
-        assert_eq!(deserialized, token);
-    }
+            // Ensure `token -> string -> token` gives us back the original token
+            let serialized = serde_json::to_string(&token).expect("serialize failed");
+            let deserialized: NucToken = serde_json::from_str(&serialized).expect("deserialize failed");
+            assert_eq!(deserialized, token);
+        }
 
-    #[test]
-    fn parse_minimal_invocation() {
-        let input = r#"
+        #[test]
+        fn parse_minimal_invocation() {
+            let input = r#"
 {
   "iss": "did:nil:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "aud": "did:nil:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -345,12 +310,12 @@ mod tests {
   },
   "nonce": "beef"
 }"#;
-        serde_json::from_str::<NucToken>(input).expect("parsing failed");
-    }
+            serde_json::from_str::<NucToken>(input).expect("parsing failed");
+        }
 
-    #[test]
-    fn parse_full_invocation() {
-        let input = r#"
+        #[test]
+        fn parse_full_invocation() {
+            let input = r#"
 {
   "iss": "did:nil:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "aud": "did:nil:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -367,31 +332,32 @@ mod tests {
   "nonce": "beef",
   "prf": ["f4f04af6a832bcd8a6855df5d0242c9a71e9da17faeb2d33b30c8903f1b5a944"]
 }"#;
-        let token: NucToken = serde_json::from_str(input).expect("parsing failed");
-        let expected = NucToken {
-            issuer: Did::new([0xaa; 33]),
-            audience: Did::new([0xbb; 33]),
-            subject: Did::new([0xcc; 33]),
-            not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
-            expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
-            command: ["nil", "db", "read"].into(),
-            body: TokenBody::Invocation(json!({ "foo": 42 }).as_object().cloned().unwrap()),
-            proofs: vec![ProofHash(*b"\xf4\xf0J\xf6\xa82\xbc\xd8\xa6\x85]\xf5\xd0$,\x9aq\xe9\xda\x17\xfa\xeb-3\xb3\x0c\x89\x03\xf1\xb5\xa9D")],
-            nonce: b"\xbe\xef".to_vec(),
-            meta: Some(json!({ "name": "bob" }).as_object().cloned().unwrap()),
-        };
-        assert_eq!(token, expected);
+            let token: NucToken = serde_json::from_str(input).expect("parsing failed");
+            #[allow(deprecated)]
+            let expected = NucToken {
+                issuer: Did::nil([0xaa; 33]),
+                audience: Did::nil([0xbb; 33]),
+                subject: Did::nil([0xcc; 33]),
+                not_before: Some(DateTime::from_timestamp(1740494955, 0).unwrap()),
+                expires_at: Some(DateTime::from_timestamp(1740495955, 0).unwrap()),
+                command: ["nil", "db", "read"].into(),
+                body: TokenBody::Invocation(json!({ "foo": 42 }).as_object().cloned().unwrap()),
+                proofs: vec![ProofHash(*b"\xf4\xf0J\xf6\xa82\xbc\xd8\xa6\x85]\xf5\xd0$,\x9aq\xe9\xda\x17\xfa\xeb-3\xb3\x0c\x89\x03\xf1\xb5\xa9D")],
+                nonce: b"\xbe\xef".to_vec(),
+                meta: Some(json!({ "name": "bob" }).as_object().cloned().unwrap()),
+            };
+            assert_eq!(token, expected);
 
-        // Ensure `token -> string -> token` gives us back the original token
-        let serialized = serde_json::to_string(&token).expect("serialize failed");
-        let deserialized: NucToken = serde_json::from_str(&serialized).expect("deserialize failed");
-        assert_eq!(deserialized, token);
-    }
+            // Ensure `token -> string -> token` gives us back the original token
+            let serialized = serde_json::to_string(&token).expect("serialize failed");
+            let deserialized: NucToken = serde_json::from_str(&serialized).expect("deserialize failed");
+            assert_eq!(deserialized, token);
+        }
 
-    #[test]
-    fn parse_mixed_delegation_invocation() {
-        // This has both `args` and `poll`.
-        let input = r#"
+        #[test]
+        fn parse_mixed_delegation_invocation() {
+            // This has both `args` and `poll`.
+            let input = r#"
 {
   "iss": "did:nil:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "aud": "did:nil:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -405,7 +371,8 @@ mod tests {
   ],
   "nonce": "beef"
 }"#;
-        serde_json::from_str::<NucToken>(input).expect_err("parsing succeeded");
+            serde_json::from_str::<NucToken>(input).expect_err("parsing succeeded");
+        }
     }
 
     #[rstest]
