@@ -13,7 +13,7 @@ pub enum Did {
     /// The legacy `nil` method.
     #[deprecated(
         since = "0.2.0",
-        note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead."
+        note = "The `did:nil` method is legacy and will be removed the next major version. Use `did:key` instead."
     )]
     Nil { public_key: [u8; 33] },
     /// The `key` method.
@@ -26,7 +26,7 @@ impl Did {
     /// Construct a Did for the `nil` method.
     #[deprecated(
         since = "0.2.0",
-        note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead."
+        note = "The `did:nil` method is legacy and will be removed the next major version. Use `did:key` instead."
     )]
     #[allow(deprecated)]
     pub fn nil(public_key: [u8; 33]) -> Self {
