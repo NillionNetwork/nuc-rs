@@ -446,6 +446,7 @@ mod tests {
         did::Did,
         envelope::from_base64,
         policy::{self},
+        signer::{DidMethod, Secp256k1Signer},
     };
     use k256::SecretKey;
     use rstest::rstest;
@@ -656,9 +657,8 @@ mod tests {
 
     impl Builder {
         fn build(self) -> String {
-            let pk: [u8; 33] = self.owner_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-            let issuer = Did::key(pk);
-            self.builder.build(issuer, &self.owner_key.into()).expect("failed to build")
+            let signer = Secp256k1Signer::new(self.owner_key.into(), DidMethod::Key);
+            self.builder.build(&signer).expect("failed to build")
         }
     }
 

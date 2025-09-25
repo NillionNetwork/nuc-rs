@@ -297,18 +297,18 @@ pub enum InvalidSignature {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct NucHeader {
+pub struct NucHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) typ: Option<NucType>,
-    pub(crate) alg: NucAlgorithm,
+    pub typ: Option<NucType>,
+    pub alg: NucAlgorithm,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) ver: Option<String>,
+    pub ver: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) met: Option<serde_json::Value>,
+    pub met: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum NucType {
+pub enum NucType {
     #[serde(rename = "nuc")]
     Nuc,
     #[serde(rename = "nuc+eip712")]
@@ -316,7 +316,7 @@ pub(crate) enum NucType {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) enum NucAlgorithm {
+pub enum NucAlgorithm {
     ES256K,
 }
 
@@ -331,8 +331,9 @@ mod tests {
         builder::{NucTokenBuilder, to_base64},
         did::Did,
         policy,
+        signer::{DidMethod, Secp256k1Signer},
     };
-    use k256::{SecretKey, ecdsa::SigningKey};
+    use k256::SecretKey;
     use rstest::rstest;
     use serde_json::json;
 
@@ -351,14 +352,12 @@ mod tests {
     #[test]
     fn decoding() {
         let key = SecretKey::random(&mut rand::thread_rng());
-        let signing_key: SigningKey = (&key).into();
-        let public_key = VerifyingKey::from(&signing_key).to_sec1_bytes();
-        let public_key: [u8; 33] = public_key.as_ref().try_into().unwrap();
+        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let encoded = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(Did::key(public_key), &key.into())
+            .build(&signer)
             .expect("build failed");
         let envelope = NucTokenEnvelope::decode(&encoded).expect("decode failed");
         envelope.validate_signatures().expect("signature validation failed");
@@ -367,14 +366,12 @@ mod tests {
     #[test]
     fn invalid_signature() {
         let key = SecretKey::random(&mut rand::thread_rng());
-        let signing_key: SigningKey = (&key).into();
-        let public_key = VerifyingKey::from(&signing_key).to_sec1_bytes();
-        let public_key: [u8; 33] = public_key.as_ref().try_into().unwrap();
+        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(Did::key(public_key), &key.into())
+            .build(&signer)
             .expect("build failed");
         let (base, signature) = token.rsplit_once(".").unwrap();
 
@@ -406,14 +403,12 @@ mod tests {
     #[test]
     fn nuc_serde() {
         let key = SecretKey::random(&mut rand::thread_rng());
-        let signing_key: SigningKey = (&key).into();
-        let public_key = VerifyingKey::from(&signing_key).to_sec1_bytes();
-        let public_key: [u8; 33] = public_key.as_ref().try_into().unwrap();
+        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let encoded = NucTokenBuilder::delegation(vec![])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(Did::key(public_key), &key.into())
+            .build(&signer)
             .expect("build failed");
 
         let token = RawNuc::from_nuc_str(&encoded).expect("decoding failed");
@@ -447,9 +442,7 @@ mod tests {
     #[test]
     fn deep_nesting() {
         let key = SecretKey::random(&mut rand::thread_rng());
-        let signing_key: SigningKey = (&key).into();
-        let public_key = VerifyingKey::from(&signing_key).to_sec1_bytes();
-        let public_key: [u8; 33] = public_key.as_ref().try_into().unwrap();
+        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let mut policy = policy::op::eq(".foo", json!(42));
         for _ in 0..128 {
             policy = policy::op::not(policy);
@@ -458,7 +451,7 @@ mod tests {
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(Did::key(public_key), &key.into())
+            .build(&signer)
             .expect("build failed");
         let err = NucTokenEnvelope::decode(&encoded).expect_err("decode succeeded");
         assert!(matches!(err, NucEnvelopeParseError::Nuc(NucParseError::Json(_, _))));

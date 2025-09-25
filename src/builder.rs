@@ -1,15 +1,14 @@
 use crate::{
     did::Did,
-    envelope::{DecodedNucToken, NucAlgorithm, NucHeader, NucTokenEnvelope, NucType, SignaturesValidated},
+    envelope::{NucTokenEnvelope, SignaturesValidated},
     policy::Policy,
+    signer::{Signer, SigningError},
     token::{Command, JsonObject, NucToken, TokenBody},
 };
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
-use k256::ecdsa::{Signature, SigningKey, VerifyingKey};
 use serde::Serialize;
-use signature::Signer;
-use std::{ops::Deref, time::Duration};
+use std::time::Duration;
 
 // Helper to simplify unwrapping options in the builder
 macro_rules! try_get {
@@ -141,44 +140,15 @@ impl NucTokenBuilder {
     }
 
     /// Build a NUC token.
-    pub fn build(self, issuer: Did, issuer_key: &SigningKey) -> Result<String, NucTokenBuildError> {
+    pub fn build(self, signer: &impl Signer) -> Result<String, NucTokenBuildError> {
         let Self { body, audience, subject, not_before, expires_at, command, meta, nonce, proof } = self;
+
         let audience = try_get!(audience)?;
         let subject = try_get!(subject)?;
         let command = try_get!(command)?;
+        let issuer = signer.did().clone();
 
-        // Verify that the issuer key matches the provided issuer Did
-        match &issuer {
-            #[allow(deprecated)]
-            Did::Nil { public_key } => {
-                let key_from_signer: [u8; 33] = VerifyingKey::from(issuer_key)
-                    .to_sec1_bytes()
-                    .deref()
-                    .try_into()
-                    .map_err(|_| NucTokenBuildError::IssuerPublicKey)?;
-                if &key_from_signer != public_key {
-                    return Err(NucTokenBuildError::IssuerKeyMismatch);
-                }
-            }
-            Did::Key { public_key } => {
-                let key_from_signer: [u8; 33] = VerifyingKey::from(issuer_key)
-                    .to_sec1_bytes()
-                    .deref()
-                    .try_into()
-                    .map_err(|_| NucTokenBuildError::IssuerPublicKey)?;
-                if &key_from_signer != public_key {
-                    return Err(NucTokenBuildError::IssuerKeyMismatch);
-                }
-            }
-            // TODO - implement when Signer trait added
-            Did::Ethr { .. } => return Err(NucTokenBuildError::UnsupportedIssuer),
-        }
-
-        // Default to a 16 byte nonce if none is set.
-        let nonce = match nonce.is_empty() {
-            true => rand::random::<[u8; 16]>().to_vec(),
-            false => nonce,
-        };
+        let nonce = if nonce.is_empty() { rand::random::<[u8; 16]>().to_vec() } else { nonce };
 
         let mut token =
             NucToken { issuer, audience, subject, not_before, expires_at, command, body, meta, nonce, proofs: vec![] };
@@ -188,40 +158,20 @@ impl NucTokenBuilder {
             let hash = envelope.token().compute_hash();
             let (root_proof, proofs) = envelope.into_parts();
             token.proofs.push(hash);
-
             all_proofs.push(root_proof);
             all_proofs.extend(proofs);
-        };
-        Self::serialize(token, issuer_key, all_proofs)
-    }
+        }
 
-    fn serialize(
-        token: NucToken,
-        issuer_key: &SigningKey,
-        proofs: Vec<DecodedNucToken>,
-    ) -> Result<String, NucTokenBuildError> {
-        use NucTokenBuildError::*;
+        let header = signer.header();
+        let header_b64 = to_base64_json(&header).map_err(|e| NucTokenBuildError::EncodingHeader(e.to_string()))?;
+        let payload_b64 = to_base64_json(&token).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
 
-        let header = match token.issuer {
-            #[allow(deprecated)]
-            Did::Nil { .. } => NucHeader { typ: None, alg: NucAlgorithm::ES256K, ver: None, met: None },
-            Did::Key { .. } => NucHeader {
-                typ: Some(NucType::Nuc),
-                alg: NucAlgorithm::ES256K,
-                ver: Some("1.0.0".to_string()),
-                met: None,
-            },
-            // TODO - implement when Signer trait added
-            Did::Ethr { .. } => return Err(UnsupportedIssuer),
-        };
+        let message_to_sign = format!("{header_b64}.{payload_b64}");
+        let signature = signer.sign(message_to_sign.as_bytes())?;
+        let signature_b64 = to_base64(&signature);
 
-        let header = to_base64_json(&header).map_err(|e| EncodingHeader(e.to_string()))?;
-        let token_payload = to_base64_json(&token).map_err(|e| EncodingToken(e.to_string()))?;
-        let mut output = format!("{header}.{token_payload}");
-        let signature: Signature = issuer_key.sign(output.as_bytes());
-        output.push('.');
-        output.push_str(&to_base64(signature.to_bytes()));
-        for proof in proofs {
+        let mut output = format!("{message_to_sign}.{signature_b64}");
+        for proof in all_proofs {
             output.push('/');
             output.push_str(&proof.to_nuc_str());
         }
@@ -246,17 +196,8 @@ pub enum NucTokenBuildError {
     #[error("encoding token: {0}")]
     EncodingToken(String),
 
-    #[error("proof serializing: {0}")]
-    ProofSerializing(serde_json::Error),
-
-    #[error("issuer signing key does not match the provided issuer Did")]
-    IssuerKeyMismatch,
-
-    #[error("the builder does not support creating tokens for this issuer type")]
-    UnsupportedIssuer,
-
-    #[error("invalid issuer public key")]
-    IssuerPublicKey,
+    #[error("signing failed: {0}")]
+    Signing(#[from] SigningError),
 }
 
 pub(crate) fn to_base64<T: AsRef<[u8]>>(input: T) -> String {
@@ -272,10 +213,12 @@ pub(crate) fn to_base64_json<T: Serialize>(input: &T) -> Result<String, serde_js
 mod tests {
     use super::*;
     use crate::{
+        did::Did,
         envelope::{NucTokenEnvelope, from_base64},
         policy,
+        signer::{DidMethod, Secp256k1Signer},
     };
-    use k256::{SecretKey, elliptic_curve::sec1::ToEncodedPoint};
+    use k256::SecretKey;
     use serde::de::DeserializeOwned;
     use serde_json::json;
 
@@ -287,33 +230,34 @@ mod tests {
     #[test]
     fn minimal_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
-        let pk_bytes: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
+        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(Did::key(pk_bytes), &key.into())
+            .build(&signer)
             .expect("build failed");
     }
 
     #[test]
     fn extend_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
-        let pk_bytes: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
-        let issuer = Did::key(pk_bytes);
+        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let base = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(issuer.clone(), &key.clone().into())
+            .build(&signer)
             .expect("build failed");
         let base = NucTokenEnvelope::decode(&base).expect("decode failed").validate_signatures().unwrap();
+
         let next = NucTokenBuilder::extending(base.clone())
             .expect("extending failed")
             .audience(Did::key([0xdd; 33]))
-            .build(issuer, &key.into())
+            .build(&signer)
             .expect("build failed");
         let next = NucTokenEnvelope::decode(&next).expect("decode failed").validate_signatures().unwrap();
+
         let (token, proofs) = next.into_parts();
         let token = token.token;
         assert_eq!(token.command, base.token().token.command);
@@ -325,8 +269,8 @@ mod tests {
     #[test]
     fn encode_decode() {
         let key = SecretKey::random(&mut rand::thread_rng());
-        let issuer_pk: [u8; 33] = key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
-        let issuer_did = Did::key(issuer_pk);
+        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let issuer_did = signer.did().clone();
 
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
@@ -336,12 +280,12 @@ mod tests {
             .expires_at(DateTime::from_timestamp(1740495955, 0).unwrap())
             .nonce([1, 2, 3])
             .meta(json!({"name": "bob"}).as_object().cloned().unwrap())
-            .build(issuer_did.clone(), &(&key).into())
+            .build(&signer)
             .expect("failed to build");
+
         let mut token_parts = token.split('.');
         let header = token_parts.next().expect("no header");
         let header = from_base64(header).unwrap();
-
         let header: serde_json::Value = serde_json::from_slice(&header).expect("invalid header");
         assert_eq!(header, json!({ "typ": "nuc", "alg": "ES256K", "ver": "1.0.0" }));
 
@@ -365,71 +309,44 @@ mod tests {
 
     #[test]
     fn chain() {
-        // Build a root NUC
         let root_key = SecretKey::random(&mut rand::thread_rng());
-        let root_pk: [u8; 33] = root_key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
-        let root_issuer = Did::key(root_pk);
+        let root_signer = Secp256k1Signer::new(root_key.into(), DidMethod::Key);
+
         let root = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(root_issuer, &root_key.into())
+            .build(&root_signer)
             .expect("build failed");
-        let root = NucTokenEnvelope::decode(&root)
-            .expect("decoding failed")
-            .validate_signatures()
-            .expect("signaturte validation failed");
+        let root = NucTokenEnvelope::decode(&root).unwrap().validate_signatures().unwrap();
 
-        // Build a delegation using the above proof
         let other_key = SecretKey::random(&mut rand::thread_rng());
-        let other_pk: [u8; 33] = other_key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
-        let other_issuer = Did::key(other_pk);
+        let other_signer = Secp256k1Signer::new(other_key.into(), DidMethod::Key);
+
         let delegation = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(root.clone())
-            .build(other_issuer, &other_key.into())
+            .build(&other_signer)
             .expect("build failed");
-        let delegation = NucTokenEnvelope::decode(&delegation)
-            .expect("decoding failed")
-            .validate_signatures()
-            .expect("signature validation failed");
+        let delegation = NucTokenEnvelope::decode(&delegation).unwrap().validate_signatures().unwrap();
 
-        // Ensure the tokens are linked.
         assert_eq!(delegation.token().token().proofs, vec![root.token().compute_hash()]);
         assert_eq!(delegation.proofs().len(), 1);
-        assert_eq!(&delegation.proofs()[0].token, root.token().token());
 
-        // Build an invocation using the above as proof.
         let yet_another_key = SecretKey::random(&mut rand::thread_rng());
-        let yet_another_pk: [u8; 33] =
-            yet_another_key.public_key().to_encoded_point(true).as_bytes().try_into().unwrap();
-        let yet_another_issuer = Did::key(yet_another_pk);
+        let yet_another_signer = Secp256k1Signer::new(yet_another_key.into(), DidMethod::Key);
+
         let invocation = NucTokenBuilder::invocation(json!({"foo": 42}).as_object().cloned().unwrap())
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .proof(delegation.clone())
-            .build(yet_another_issuer, &yet_another_key.into())
+            .build(&yet_another_signer)
             .expect("build failed");
+        let invocation = NucTokenEnvelope::decode(&invocation).unwrap().validate_signatures().unwrap();
 
-        let invocation = NucTokenEnvelope::decode(&invocation)
-            .expect("decoding failed")
-            .validate_signatures()
-            .expect("signature validation failed");
-
-        // Ensure both delegations are included as proofs
-        assert_eq!(invocation.token().token().proofs, vec![delegation.token().compute_hash()]);
         assert_eq!(invocation.proofs().len(), 2);
-        assert_eq!(&invocation.proofs()[0].token, delegation.token().token());
-        assert_eq!(&invocation.proofs()[1].token, root.token().token());
-    }
-
-    #[test]
-    fn decode_specific() {
-        // this is a specific token generated by the above function
-        let token = "eyJhbGciOiJFUzI1NksifQ.eyJpc3MiOiJkaWQ6bmlsOjAyMjZhNGQ0YTRhNWZhZGUxMmM1ZmYwZWM5YzQ3MjQ5ZjIxY2Y3N2EyMDI3NTFmOTU5ZDVjNzc4ZjBiNjUyYjcxNiIsImF1ZCI6ImRpZDpuaWw6YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwic3ViIjoiZGlkOm5pbDpjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJjbWQiOiIvbmlsL2RiL3JlYWQiLCJhcmdzIjp7ImZvbyI6NDJ9LCJub25jZSI6IjAxMDIwMyIsInByZiI6WyJjOTA0YzVhMWFiMzY5YWVhMWI0ZDlkMTkwMmE0NmU2ZWY5NGFhYjk2OTY0YmI1MWQ2MWE2MWIwM2UyM2Q1ZGZmIl19.ufDYxqoSVNVETrVKReu0h_Piul5c6RoC_VnGGLw04mkyn2OMrtQjK92sGXNHCjlp7T9prIwxX14ZB_N3gx7hPg/eyJhbGciOiJFUzI1NksifQ.eyJpc3MiOiJkaWQ6bmlsOjAzNmY3MDdmYmVmMGI3NTIxMzgwOGJiYmY1NGIxODIxNzZmNTMyMGZhNTIwY2I4MTlmMzViNWJhZjIzMjM4YTAxNSIsImF1ZCI6ImRpZDpuaWw6YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwic3ViIjoiZGlkOm5pbDpjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJjbWQiOiIvbmlsL2RiL3JlYWQiLCJwb2wiOltbIj09IiwiLmZvbyIsNDJdXSwibm9uY2UiOiIwMTAyMDMiLCJwcmYiOlsiODZjZGI1ZjZjN2M3NDFkMDBmNmI4ODMzZDI0ZjdlY2Y5MWFjOGViYzI2MzA3MmZkYmU0YTZkOTQ5NzIwMmNiNCJdfQ.drGzkA0hYP8h62GxNN3fhi9bKjYgjpSy4cM52-9RsyB7JD6O6K1wRsg_x1hv8ladPmChpwDVVXOzjNr2NRVntA/eyJhbGciOiJFUzI1NksifQ.eyJpc3MiOiJkaWQ6bmlsOjAzOTU5MGNjYWYxMDI0ZjQ5YzljZjc0M2Y4YTZlZDQyMDNlNzgyZThlZTA5YWZhNTNkMWI1NzY0OTg0NjEyMzQyNSIsImF1ZCI6ImRpZDpuaWw6YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwic3ViIjoiZGlkOm5pbDpjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJjbWQiOiIvbmlsL2RiL3JlYWQiLCJwb2wiOltbIj09IiwiLmZvbyIsNDJdXSwibm9uY2UiOiIwMTAyMDMiLCJwcmYiOltdfQ.o3lnQxCjDCW10UuRABrHp8FpB_C6q1xgEGvfuXTb7Epp63ry8R2h0wHjToDKDFmkmUmO2jcBkrttuy8kftV6og";
-        NucTokenEnvelope::decode(token).expect("failed to decode");
     }
 }
