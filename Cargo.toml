@@ -8,7 +8,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 ethers = { version = "2.0", features = ["legacy"] }
 hex = { version = "0.4", features = ["serde"] }
-hex-literal = "0.4"
+hex-literal = "1.0"
 itertools = "0.14"
 multibase = "0.9"
 k256 = "0.13"
