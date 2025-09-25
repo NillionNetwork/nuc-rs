@@ -212,15 +212,15 @@ mod tests {
     use super::*;
     use crate::signer::Eip712Signer;
     use crate::{
-        Signer,
+        Signer, Signer,
         did::Did,
         envelope::{NucTokenEnvelope, from_base64},
+        keypair::Keypair,
         policy,
-        signer::{DidMethod, Secp256k1Signer},
+        signer::DidMethod,
     };
     use ethers::prelude::LocalWallet;
     use ethers::types::transaction::eip712::EIP712Domain;
-    use k256::SecretKey;
     use serde::de::DeserializeOwned;
     use serde_json::json;
     use std::default::Default;
@@ -233,8 +233,8 @@ mod tests {
 
     #[tokio::test]
     async fn minimal_token() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
@@ -246,8 +246,8 @@ mod tests {
 
     #[tokio::test]
     async fn extend_token() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         let base = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
@@ -275,8 +275,8 @@ mod tests {
 
     #[tokio::test]
     async fn encode_decode() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         let issuer_did = signer.did().clone();
 
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
@@ -320,8 +320,8 @@ mod tests {
     async fn heterogeneous_chain() {
         // Setup - Define the actors in the delegation chain
         // Root authority (did:nil)
-        let root_key = SecretKey::random(&mut rand::thread_rng());
-        let root_signer = Secp256k1Signer::new(root_key.into(), DidMethod::Nil);
+        let root_keypair = Keypair::generate();
+        let root_signer = root_keypair.signer(DidMethod::Nil);
 
         // Intermediate authority (did:ethr)
         let eth_wallet = LocalWallet::new(&mut rand::thread_rng());
@@ -329,8 +329,8 @@ mod tests {
         let ethr_signer = Eip712Signer::new(domain, eth_wallet.clone());
 
         // Final actor (did:key)
-        let final_key = SecretKey::random(&mut rand::thread_rng());
-        let final_signer = Secp256k1Signer::new(final_key.into(), DidMethod::Key);
+        let final_keypair = Keypair::generate();
+        let final_signer = final_keypair.signer(DidMethod::Key);
 
         // Step 1 - Root grants authority to the `ethr` identity.
         let root_delegation = NucTokenBuilder::delegation(vec![])

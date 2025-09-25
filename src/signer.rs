@@ -52,7 +52,7 @@ pub struct Secp256k1Signer {
 impl Secp256k1Signer {
     /// Create a new `Secp256k1Signer`.
     #[allow(deprecated)]
-    pub fn new(key: SigningKey, method: DidMethod) -> Self {
+    pub(crate) fn new(key: SigningKey, method: DidMethod) -> Self {
         let public_key: [u8; 33] = key.verifying_key().to_sec1_bytes().deref().try_into().unwrap();
         let (did, header) = match method {
             DidMethod::Key => (

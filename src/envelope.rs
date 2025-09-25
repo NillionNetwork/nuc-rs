@@ -336,17 +336,17 @@ mod tests {
     use crate::{
         builder::{NucTokenBuilder, to_base64},
         did::Did,
+        keypair::Keypair,
         policy,
-        signer::{DidMethod, Secp256k1Signer},
+        signer::DidMethod,
     };
-    use k256::SecretKey;
     use rstest::rstest;
     use serde_json::json;
 
     #[tokio::test]
     async fn decoding() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         let encoded = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
@@ -360,8 +360,8 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
@@ -399,8 +399,8 @@ mod tests {
 
     #[tokio::test]
     async fn nuc_serde() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         let encoded = NucTokenBuilder::delegation(vec![])
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
@@ -439,8 +439,8 @@ mod tests {
 
     #[tokio::test]
     async fn deep_nesting() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         let mut policy = policy::op::eq(".foo", json!(42));
         for _ in 0..128 {
             policy = policy::op::not(policy);
