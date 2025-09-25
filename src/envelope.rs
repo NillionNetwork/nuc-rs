@@ -2,8 +2,9 @@ use crate::{
     did::Did,
     token::{Eip712NucPayload, NucToken, ProofHash},
 };
-use base64::{Engine, display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD};
-use ethers_core::types::Signature as EthersSignature;
+use base64::{display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use ethers::types::transaction::eip712::EIP712Domain;
+use ethers::types::Signature as EthersSignature;
 use k256::ecdsa::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -215,8 +216,10 @@ impl DecodedNucToken {
         match header.typ {
             // This is a did:ethr token.
             Some(NucType::NucEip712) => {
+                let domain: EIP712Domain = serde_json::from_value(header.met.ok_or(InvalidSignature::InvalidHeader)?)
+                    .map_err(|_| InvalidSignature::InvalidHeader)?;
                 let typed_data = Eip712NucPayload::from(self.token.clone())
-                    .eip712_encode_data()
+                    .eip712_encode_data(domain)
                     .map_err(|_| InvalidSignature::Eip712Encoding)?;
                 let signature = EthersSignature::try_from(self.raw.signature.as_slice())
                     .map_err(|_| InvalidSignature::Signature)?;
@@ -328,7 +331,7 @@ pub(crate) fn from_base64(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 mod tests {
     use super::*;
     use crate::{
-        builder::{NucTokenBuilder, to_base64},
+        builder::{to_base64, NucTokenBuilder},
         did::Did,
         policy,
         signer::{DidMethod, Secp256k1Signer},
@@ -337,20 +340,8 @@ mod tests {
     use rstest::rstest;
     use serde_json::json;
 
-    // A valid did:ethr token - using the same key did as audience for simplicity in test
-    const VALID_ETHR_TOKEN: &str = "eyJ0eXAiOiJudWMrZWlwNzEyIiwiYWxnIjoiRVMyNTZLIiwidmVyIjoiMS4wLjAiLCJtZXQiOnsiZG9tYWluIjp7Im5hbWUiOiJOVUMiLCJ2ZXJzaW9uIjoiMSIsImNoYWluSWQiOjF9LCJwcmltYXJ5VHlwZSI6Ik51Y1BheWxvYWQiLCJ0eXBlcyI6eyJOdWNQYXlsb2FkIjpbeyJuYW1lIjoiaXNzIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6ImF1ZCIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJzdWIiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoiY21kIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6InBvbCIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJhcmdzIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6Im5iZiIsInR5cGUiOiJ1aW50MjU2In0seyJuYW1lIjoiZXhwIiwidHlwZSI6InVpbnQyNTYifSx7Im5hbWUiOiJub25jZSIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJwcmYiLCJ0eXBlIjoic3RyaW5nW10ifV19fX0.eyJpc3MiOiJkaWQ6ZXRocjoweDI5MDMxRkFEODI5MDhFNDc2NDg1YzRFNjBGYzVBMTU2YWI1ZjFhNzQiLCJhdWQiOiJkaWQ6ZXRocjoweDI5MDMxRkFEODI5MDhFNDc2NDg1YzRFNjBGYzVBMTU2YWI1ZjFhNzQiLCJzdWIiOiJkaWQ6ZXRocjoweDI5MDMxRkFEODI5MDhFNDc2NDg1YzRFNjBGYzVBMTU2YWI1ZjFhNzQiLCJjbWQiOiIvIiwicG9sIjpbXSwibm9uY2UiOiJiZWVmIn0.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-
-    #[test]
-    #[ignore = "EIP-712 test requires a properly signed token - current token has placeholder signature"]
-    fn did_ethr_token_validation() {
-        // This test validates the EIP-712 signature mechanism for did:ethr tokens
-        // The token needs to be signed with a private key corresponding to the Ethereum address
-        let envelope = NucTokenEnvelope::decode(VALID_ETHR_TOKEN).expect("decode failed");
-        envelope.validate_signatures().expect("signature validation failed");
-    }
-
-    #[test]
-    fn decoding() {
+    #[tokio::test]
+    async fn decoding() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let encoded = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
@@ -358,13 +349,14 @@ mod tests {
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&signer)
+            .await
             .expect("build failed");
         let envelope = NucTokenEnvelope::decode(&encoded).expect("decode failed");
         envelope.validate_signatures().expect("signature validation failed");
     }
 
-    #[test]
-    fn invalid_signature() {
+    #[tokio::test]
+    async fn invalid_signature() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
@@ -372,6 +364,7 @@ mod tests {
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&signer)
+            .await
             .expect("build failed");
         let (base, signature) = token.rsplit_once(".").unwrap();
 
@@ -395,13 +388,14 @@ mod tests {
     #[case::emoji(".🚀")]
     #[case::b64_emoji(".8J-agA==")]
     fn invalid_suffixes(#[case] suffix: &str) {
-        // append the suffix where the proof array would go
-        let input = format!("{VALID_ETHR_TOKEN}{suffix}");
-        NucTokenEnvelope::decode(&input).expect_err("decode succeeded");
+        // A valid token string for testing invalid suffixes
+        let valid_token = "eyJ0eXAiOiJudWMiLCJhbGciOiJFUzI1NksiLCJ2ZXIiOiIxLjAuMCJ9.eyJpc3MiOiJkaWQ6a2V5OnpRM3NoRjZaZVFtb0dwb1FqWlRSZnZqR0QyU3ZjVFYxWFR2RkpBVDV2R3hFUDd3TyIsImF1ZCI6ImRpZDprZXk6elEzc2hGNlpjUW1vR3BvUWpaVFJmdmpHRDJTdmNUVjFYVHYyRkpBVDV2R3hFUDd3TyIsInN1YiI6ImRpZDprZXk6elEzc2hGNlpjUW1vR3BvUWpaVFJmdmpHRDJTdmNUVjFYVHYyRkpBVDV2R3hFUDd3TyIsImNtZCI6Ii8iLCJwb2wiOltdLCJub25jZSI6IjAwIn0.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let input = format!("{valid_token}{suffix}");
+        NucTokenEnvelope::decode(&input).expect_err("decode succeeded  when it should have failed");
     }
 
-    #[test]
-    fn nuc_serde() {
+    #[tokio::test]
+    async fn nuc_serde() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let encoded = NucTokenBuilder::delegation(vec![])
@@ -409,6 +403,7 @@ mod tests {
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&signer)
+            .await
             .expect("build failed");
 
         let token = RawNuc::from_nuc_str(&encoded).expect("decoding failed");
@@ -439,8 +434,8 @@ mod tests {
             .expect("signature validation failed");
     }
 
-    #[test]
-    fn deep_nesting() {
+    #[tokio::test]
+    async fn deep_nesting() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let mut policy = policy::op::eq(".foo", json!(42));
@@ -452,6 +447,7 @@ mod tests {
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&signer)
+            .await
             .expect("build failed");
         let err = NucTokenEnvelope::decode(&encoded).expect_err("decode succeeded");
         assert!(matches!(err, NucEnvelopeParseError::Nuc(NucParseError::Json(_, _))));

@@ -5,7 +5,7 @@ use crate::{
     signer::{Signer, SigningError},
     token::{Command, JsonObject, NucToken, TokenBody},
 };
-use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
+use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::time::Duration;
@@ -140,7 +140,7 @@ impl NucTokenBuilder {
     }
 
     /// Build a NUC token.
-    pub fn build(self, signer: &impl Signer) -> Result<String, NucTokenBuildError> {
+    pub async fn build(self, signer: &impl Signer) -> Result<String, NucTokenBuildError> {
         let Self { body, audience, subject, not_before, expires_at, command, meta, nonce, proof } = self;
 
         let audience = try_get!(audience)?;
@@ -162,15 +162,13 @@ impl NucTokenBuilder {
             all_proofs.extend(proofs);
         }
 
-        let header = signer.header();
+        let (header, signature) = signer.sign_token(&token).await?;
+
         let header_b64 = to_base64_json(&header).map_err(|e| NucTokenBuildError::EncodingHeader(e.to_string()))?;
         let payload_b64 = to_base64_json(&token).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
-
-        let message_to_sign = format!("{header_b64}.{payload_b64}");
-        let signature = signer.sign(message_to_sign.as_bytes())?;
         let signature_b64 = to_base64(&signature);
 
-        let mut output = format!("{message_to_sign}.{signature_b64}");
+        let mut output = format!("{header_b64}.{payload_b64}.{signature_b64}");
         for proof in all_proofs {
             output.push('/');
             output.push_str(&proof.to_nuc_str());
@@ -212,23 +210,30 @@ pub(crate) fn to_base64_json<T: Serialize>(input: &T) -> Result<String, serde_js
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::signer::Eip712Signer;
     use crate::{
+        Signer,
         did::Did,
-        envelope::{NucTokenEnvelope, from_base64},
+        envelope::{from_base64, NucTokenEnvelope},
         policy,
         signer::{DidMethod, Secp256k1Signer},
+        Signer,
     };
+    use ethers::prelude::LocalWallet;
+    use ethers::types::transaction::eip712::EIP712Domain;
     use k256::SecretKey;
     use serde::de::DeserializeOwned;
     use serde_json::json;
+    use std::default::Default;
+    use tokio;
 
     fn from_base64_json<T: DeserializeOwned>(input: &str) -> T {
         let input = from_base64(input).expect("invalid base 64");
         serde_json::from_slice(&input).expect("invalid JSON")
     }
 
-    #[test]
-    fn minimal_token() {
+    #[tokio::test]
+    async fn minimal_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
@@ -236,11 +241,12 @@ mod tests {
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&signer)
+            .await
             .expect("build failed");
     }
 
-    #[test]
-    fn extend_token() {
+    #[tokio::test]
+    async fn extend_token() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let base = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
@@ -248,6 +254,7 @@ mod tests {
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
             .build(&signer)
+            .await
             .expect("build failed");
         let base = NucTokenEnvelope::decode(&base).expect("decode failed").validate_signatures().unwrap();
 
@@ -255,6 +262,7 @@ mod tests {
             .expect("extending failed")
             .audience(Did::key([0xdd; 33]))
             .build(&signer)
+            .await
             .expect("build failed");
         let next = NucTokenEnvelope::decode(&next).expect("decode failed").validate_signatures().unwrap();
 
@@ -266,8 +274,8 @@ mod tests {
         assert_eq!(proofs[0].token, base.token().token);
     }
 
-    #[test]
-    fn encode_decode() {
+    #[tokio::test]
+    async fn encode_decode() {
         let key = SecretKey::random(&mut rand::thread_rng());
         let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
         let issuer_did = signer.did().clone();
@@ -281,6 +289,7 @@ mod tests {
             .nonce([1, 2, 3])
             .meta(json!({"name": "bob"}).as_object().cloned().unwrap())
             .build(&signer)
+            .await
             .expect("failed to build");
 
         let mut token_parts = token.split('.');
@@ -307,46 +316,66 @@ mod tests {
         assert_eq!(nuc, expected);
     }
 
-    #[test]
-    fn chain() {
+    #[tokio::test]
+    #[allow(deprecated)]
+    async fn heterogeneous_chain() {
+        // Setup - Define the actors in the delegation chain
+        // Root authority (did:nil)
         let root_key = SecretKey::random(&mut rand::thread_rng());
-        let root_signer = Secp256k1Signer::new(root_key.into(), DidMethod::Key);
+        let root_signer = Secp256k1Signer::new(root_key.into(), DidMethod::Nil);
 
-        let root = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::key([0xbb; 33]))
-            .subject(Did::key([0xcc; 33]))
-            .command(["nil", "db", "read"])
+        // Intermediate authority (did:ethr)
+        let eth_wallet = LocalWallet::new(&mut rand::thread_rng());
+        let domain = EIP712Domain { name: Some("NUC".into()), version: Some("1.0.0".into()), ..Default::default() };
+        let ethr_signer = Eip712Signer::new(domain, eth_wallet.clone());
+
+        // Final actor (did:key)
+        let final_key = SecretKey::random(&mut rand::thread_rng());
+        let final_signer = Secp256k1Signer::new(final_key.into(), DidMethod::Key);
+
+        // Step 1 - Root grants authority to the `ethr` identity.
+        let root_delegation = NucTokenBuilder::delegation(vec![])
+            .audience(Did::key([0xaa; 33]))
+            .subject(ethr_signer.did().clone())
+            .command(["nil", "db"])
             .build(&root_signer)
-            .expect("build failed");
-        let root = NucTokenEnvelope::decode(&root).unwrap().validate_signatures().unwrap();
+            .await
+            .expect("building root nuc failed");
 
-        let other_key = SecretKey::random(&mut rand::thread_rng());
-        let other_signer = Secp256k1Signer::new(other_key.into(), DidMethod::Key);
+        let root_envelope = NucTokenEnvelope::decode(&root_delegation)
+            .expect("decoding root failed")
+            .validate_signatures()
+            .expect("root validation failed");
 
-        let delegation = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
-            .audience(Did::key([0xbb; 33]))
-            .subject(Did::key([0xcc; 33]))
+        // Step 2: `ethr` identity delegates its authority to the `final` identity
+        let ethr_delegation = NucTokenBuilder::extending(root_envelope.clone())
+            .expect("extending from root failed")
+            .audience(Did::key([0xaa; 33])) // Same resource server
+            .subject(final_signer.did().clone()) // Delegate to final_signer
+            .build(&ethr_signer)
+            .await
+            .expect("building ethr delegation failed");
+
+        let ethr_envelope = NucTokenEnvelope::decode(&ethr_delegation)
+            .expect("decoding ethr delegation failed")
+            .validate_signatures()
+            .expect("ethr delegation validation failed");
+
+        // Step 3: Final actor invokes a command
+        let final_invocation = NucTokenBuilder::invocation(json!({}).as_object().cloned().unwrap())
+            .proof(ethr_envelope.clone())
+            .audience(Did::key([0xaa; 33]))
+            .subject(final_signer.did().clone())
             .command(["nil", "db", "read"])
-            .proof(root.clone())
-            .build(&other_signer)
-            .expect("build failed");
-        let delegation = NucTokenEnvelope::decode(&delegation).unwrap().validate_signatures().unwrap();
+            .build(&final_signer)
+            .await
+            .expect("building final invocation failed");
 
-        assert_eq!(delegation.token().token().proofs, vec![root.token().compute_hash()]);
-        assert_eq!(delegation.proofs().len(), 1);
+        let final_envelope = NucTokenEnvelope::decode(&final_invocation)
+            .expect("decoding final invocation failed")
+            .validate_signatures()
+            .expect("final chain validation failed");
 
-        let yet_another_key = SecretKey::random(&mut rand::thread_rng());
-        let yet_another_signer = Secp256k1Signer::new(yet_another_key.into(), DidMethod::Key);
-
-        let invocation = NucTokenBuilder::invocation(json!({"foo": 42}).as_object().cloned().unwrap())
-            .audience(Did::key([0xbb; 33]))
-            .subject(Did::key([0xcc; 33]))
-            .command(["nil", "db", "read"])
-            .proof(delegation.clone())
-            .build(&yet_another_signer)
-            .expect("build failed");
-        let invocation = NucTokenEnvelope::decode(&invocation).unwrap().validate_signatures().unwrap();
-
-        assert_eq!(invocation.proofs().len(), 2);
+        assert_eq!(final_envelope.proofs().len(), 2, "invocation envelope should have two proofs");
     }
 }

@@ -1,9 +1,9 @@
-use ethers_core::utils::{keccak256, to_checksum};
+use ethers::types::Address;
+use ethers::utils::to_checksum;
 use hex::FromHexError;
 use multibase::{Base, encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 use std::{fmt, str::FromStr};
-use ethers_core::types::Address;
 
 const SECP256K1_PREFIX: [u8; 2] = [0xe7, 0x01];
 
@@ -23,7 +23,7 @@ pub enum Did {
 }
 
 impl Did {
-    /// Construct a new Did for the `nil` method.
+    /// Construct a Did for the `nil` method.
     #[deprecated(
         since = "0.2.0",
         note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead."
@@ -33,12 +33,12 @@ impl Did {
         Self::Nil { public_key }
     }
 
-    /// Construct a new Did for the `key` method.
+    /// Construct a Did for the `key` method.
     pub fn key(public_key: [u8; 33]) -> Self {
         Self::Key { public_key }
     }
 
-    /// Construct a new Did for the `ethr` method.
+    /// Construct a Did for the `ethr` method.
     pub fn ethr(address: [u8; 20]) -> Self {
         Self::Ethr { address }
     }
@@ -61,7 +61,7 @@ impl fmt::Display for Did {
             }
             Did::Ethr { address } => {
                 let addr = Address::from(*address);
-                write!(f, "did:ethr:0x{}", to_checksum(&addr, None))
+                write!(f, "did:ethr:{}", to_checksum(&addr, None))
             }
         }
     }

@@ -394,9 +394,9 @@ pub use eip712::Eip712NucPayload;
 
 pub mod eip712 {
     use crate::token::{NucToken, TokenBody};
-    use ethers_core::types::{
+    use ethers::types::{
         H256,
-        transaction::eip712::{EIP712Domain, Eip712, Eip712DomainType, TypedData},
+        transaction::eip712::{EIP712Domain, Eip712, Eip712DomainType, TypedData, Types},
     };
     use serde::Serialize;
     use serde_json::Value;
@@ -443,8 +443,9 @@ pub mod eip712 {
     }
 
     impl Eip712NucPayload {
-        pub fn eip712_encode_data(&self) -> Result<H256, String> {
-            let mut types = BTreeMap::new();
+        /// Create typed data for EIP-712 signing
+        pub fn to_typed_data(&self, domain: EIP712Domain) -> Result<TypedData, String> {
+            let mut types = Types::new();
             types.insert(
                 "NucPayload".to_string(),
                 vec![
@@ -461,20 +462,15 @@ pub mod eip712 {
                 ],
             );
 
-            let domain = EIP712Domain {
-                name: Some("NUC".into()),
-                version: Some("1".into()),
-                chain_id: Some(1u64.into()),
-                verifying_contract: None,
-                salt: None,
-            };
+            let message: BTreeMap<String, Value> =
+                serde_json::to_value(self).and_then(serde_json::from_value).map_err(|e| e.to_string())?;
 
-            let message = serde_json::to_value(self)
-                .and_then(serde_json::from_value::<BTreeMap<String, Value>>)
-                .map_err(|e| e.to_string())?;
+            Ok(TypedData { domain, types, primary_type: "NucPayload".to_string(), message })
+        }
 
-            let typed_data = TypedData { domain, types, primary_type: "NucPayload".to_string(), message };
-
+        /// Legacy method for envelope signature validation
+        pub fn eip712_encode_data(&self, domain: EIP712Domain) -> Result<H256, String> {
+            let typed_data = self.to_typed_data(domain)?;
             typed_data.encode_eip712().map(H256::from).map_err(|e| e.to_string())
         }
     }
