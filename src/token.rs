@@ -9,19 +9,29 @@ use std::{fmt, str::FromStr};
 /// A JSON object.
 pub type JsonObject = serde_json::Map<String, serde_json::Value>;
 
-/// A Nillion NUC token.
+/// A Nillion Nuc token.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NucToken {
-    /// The token issuer.
+    /// The issuer of the token (iss).
+    ///
+    /// This is the principal that created and signed the token. In a delegation chain,
+    /// the issuer of a token must be the subject of the proof it is extending.
     #[serde(rename = "iss")]
     pub issuer: Did,
 
-    /// The token issuer.
+    /// The audience of the token (aud).
+    ///
+    /// This is the principal that the token is intended for, which will be expected
+    /// to verify and honor it. This is typically the DID of a resource server.
     #[serde(rename = "aud")]
     pub audience: Did,
 
-    /// The token subject.
+    /// The subject of the token (sub).
+    ///
+    /// This is the principal that is being granted the authority of this token.
+    /// In a delegation, this is the identity that can use this token as a proof
+    /// to issue further, more attenuated tokens.
     #[serde(rename = "sub")]
     pub subject: Did,
 

@@ -13,18 +13,18 @@ use std::{iter, marker::PhantomData};
 
 const DEFAULT_MAX_RAW_TOKEN_SIZE: usize = 1024 * 10;
 
-/// An envelope for a NUC token.
+/// An envelope for a Nuc token.
 ///
-/// This contains the NUC token itself along with all of its proofs.
+/// This contains the Nuc token itself along with all of its proofs.
 #[derive(Clone, Debug)]
 pub struct NucTokenEnvelope<T = SignaturesUnvalidated> {
-    token: DecodedNucToken,
-    proofs: Vec<DecodedNucToken>,
-    _unused: PhantomData<T>,
+    pub(crate) token: DecodedNucToken,
+    pub(crate) proofs: Vec<DecodedNucToken>,
+    pub(crate) _unused: PhantomData<T>,
 }
 
 impl NucTokenEnvelope<SignaturesUnvalidated> {
-    /// Decode a NUC token.
+    /// Decode a Nuc token.
     ///
     /// This performs no integrity checks, and instead only ensures the token and its proofs are well formed.
     pub fn decode(s: &str) -> Result<Self, NucEnvelopeParseError> {
@@ -71,7 +71,7 @@ impl<T> NucTokenEnvelope<T> {
     }
 }
 
-/// A NUC token envelope decoder.
+/// A Nuc token envelope decoder.
 #[derive(Debug)]
 pub struct NucEnvelopeDecoder {
     /// The maximum raw token size, in bytes.
@@ -85,7 +85,7 @@ impl Default for NucEnvelopeDecoder {
 }
 
 impl NucEnvelopeDecoder {
-    /// Decode a NUC.
+    /// Decode a Nuc.
     pub fn decode(&self, s: &str) -> Result<NucTokenEnvelope, NucEnvelopeParseError> {
         if s.len() > self.max_raw_token_size {
             return Err(NucEnvelopeParseError::NucTooLarge(self.max_raw_token_size));
@@ -112,7 +112,14 @@ pub struct SignaturesValidated;
 #[derive(Clone, Debug)]
 pub struct SignaturesUnvalidated;
 
-/// An error when parsing a NUC envelope.
+impl NucTokenEnvelope<SignaturesValidated> {
+    /// Convert a validated envelope to an unvalidated one.
+    pub fn unvalidate(self) -> NucTokenEnvelope<SignaturesUnvalidated> {
+        NucTokenEnvelope { token: self.token, proofs: self.proofs, _unused: PhantomData }
+    }
+}
+
+/// An error when parsing a Nuc envelope.
 #[derive(Debug, thiserror::Error)]
 pub enum NucEnvelopeParseError {
     #[error("empty input")]
@@ -125,7 +132,7 @@ pub enum NucEnvelopeParseError {
     Nuc(#[from] NucParseError),
 }
 
-/// A raw NUC token.
+/// A raw Nuc token.
 ///
 /// This contains the raw parts that were serialized from a Nuc and is used to have access to the
 /// original unmodified
@@ -162,7 +169,7 @@ impl RawNuc {
     }
 }
 
-/// An error when parsing a NUC.
+/// An error when parsing a Nuc.
 #[derive(Debug, thiserror::Error)]
 pub enum NucParseError {
     #[error("no {0} component in nuc")]
@@ -175,9 +182,9 @@ pub enum NucParseError {
     Json(&'static str, serde_json::Error),
 }
 
-/// A decoded NUC token.
+/// A decoded Nuc token.
 ///
-/// This is a wrapper over a NUC token along with its raw pieces to be able to re-serialize it
+/// This is a wrapper over a Nuc token along with its raw pieces to be able to re-serialize it
 /// later on without altering its contents.
 #[derive(Clone, Debug)]
 pub struct DecodedNucToken {
@@ -186,7 +193,7 @@ pub struct DecodedNucToken {
 }
 
 impl DecodedNucToken {
-    fn from_raw(raw: RawNuc) -> Result<Self, NucParseError> {
+    pub(crate) fn from_raw(raw: RawNuc) -> Result<Self, NucParseError> {
         // Validate the NUC header
         let _header: NucHeader = serde_json::from_slice(&raw.header).map_err(|e| NucParseError::Json("header", e))?;
         let token = serde_json::from_slice(&raw.payload).map_err(|e| NucParseError::Json("token", e))?;
@@ -210,6 +217,9 @@ impl DecodedNucToken {
     }
 
     /// Validate the signature in this token.
+    ///
+    /// This validates the signature for this single token only and does not
+    /// validate any proofs in the chain.
     pub(crate) fn validate_signature(&self) -> Result<(), InvalidSignature> {
         let header: NucHeader =
             serde_json::from_slice(&self.raw.header).map_err(|_| InvalidSignature::InvalidHeader)?;
@@ -262,7 +272,7 @@ impl DecodedNucToken {
         Ok(())
     }
 
-    /// Get the NUC token.
+    /// Get the Nuc token.
     pub fn token(&self) -> &NucToken {
         &self.token
     }
@@ -330,25 +340,21 @@ pub(crate) fn from_base64(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        builder::{NucTokenBuilder, to_base64},
-        did::Did,
-        policy,
-        signer::{DidMethod, Secp256k1Signer},
-    };
-    use k256::SecretKey;
+    use crate::builder::DelegationBuilder;
+    use crate::{builder::to_base64, did::Did, keypair::Keypair, policy, signer::DidMethod};
     use rstest::rstest;
     use serde_json::json;
 
     #[tokio::test]
     async fn decoding() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
-        let encoded = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
+        let encoded = DelegationBuilder::new()
+            .policy(policy::op::eq(".foo", json!(42)))
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(&signer)
+            .sign_and_serialize(&signer)
             .await
             .expect("build failed");
         let envelope = NucTokenEnvelope::decode(&encoded).expect("decode failed");
@@ -357,13 +363,14 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
-        let token = NucTokenBuilder::delegation(vec![policy::op::eq(".foo", json!(42))])
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
+        let token = DelegationBuilder::new()
+            .policy(policy::op::eq(".foo", json!(42)))
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(&signer)
+            .sign_and_serialize(&signer)
             .await
             .expect("build failed");
         let (base, signature) = token.rsplit_once(".").unwrap();
@@ -396,13 +403,13 @@ mod tests {
 
     #[tokio::test]
     async fn nuc_serde() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
-        let encoded = NucTokenBuilder::delegation(vec![])
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
+        let encoded = DelegationBuilder::new()
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(&signer)
+            .sign_and_serialize(&signer)
             .await
             .expect("build failed");
 
@@ -436,17 +443,18 @@ mod tests {
 
     #[tokio::test]
     async fn deep_nesting() {
-        let key = SecretKey::random(&mut rand::thread_rng());
-        let signer = Secp256k1Signer::new(key.into(), DidMethod::Key);
+        let keypair = Keypair::generate();
+        let signer = keypair.signer(DidMethod::Key);
         let mut policy = policy::op::eq(".foo", json!(42));
         for _ in 0..128 {
             policy = policy::op::not(policy);
         }
-        let encoded = NucTokenBuilder::delegation(vec![policy])
+        let encoded = DelegationBuilder::new()
+            .policy(policy)
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .build(&signer)
+            .sign_and_serialize(&signer)
             .await
             .expect("build failed");
         let err = NucTokenEnvelope::decode(&encoded).expect_err("decode succeeded");

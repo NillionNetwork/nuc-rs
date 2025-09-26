@@ -5,7 +5,7 @@ use serde::{
 };
 use std::{collections::HashMap, fmt};
 
-/// A NUC policy.
+/// A Nuc policy.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Policy {
     Operator(OperatorPolicy),
