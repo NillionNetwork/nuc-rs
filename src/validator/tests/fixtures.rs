@@ -5,14 +5,14 @@ use crate::{
     keypair::Keypair,
     signer::{DidMethod, Secp256k1Signer},
     validator::{
-        error::{ValidationError, ValidationKind}, NucValidator, TimeProvider, ValidatedNucToken,
-        ValidationParameters,
+        NucValidator, TimeProvider, ValidatedNucToken, ValidationParameters,
+        error::{ValidationError, ValidationKind},
     },
 };
 use chrono::{DateTime, Utc};
 use k256::PublicKey;
 use serde::Serialize;
-use serde_with::{serde_as, DisplayFromStr};
+use serde_with::{DisplayFromStr, serde_as};
 use std::{collections::HashMap, env, sync::LazyLock};
 
 pub(crate) static ROOT_KEYPAIR: LazyLock<Keypair> = LazyLock::new(Keypair::generate);
@@ -191,4 +191,75 @@ pub(crate) fn delegation(subject: &Keypair) -> DelegationBuilder {
 #[allow(dead_code)]
 pub(crate) fn invocation(subject: &Keypair) -> InvocationBuilder {
     InvocationBuilder::new().audience(Did::key([0xde; 33])).subject(subject.to_did(DidMethod::Key))
+}
+
+use crate::envelope::SignaturesValidated;
+
+/// Builds a standard two-link delegation chain (`root -> second`).
+pub(crate) async fn build_two_link_delegation_chain<F, G>(
+    root_modifier: F,
+    second_modifier: G,
+) -> NucTokenEnvelope<SignaturesValidated>
+where
+    F: FnOnce(DelegationBuilder) -> DelegationBuilder,
+    G: FnOnce(DelegationBuilder) -> DelegationBuilder,
+{
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // Build the root delegation with sensible defaults
+    let root_builder = DelegationBuilder::new()
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .subject(key.to_did(DidMethod::Key));
+
+    // Apply test-specific modifications to the root
+    let root_builder = root_modifier(root_builder);
+
+    let root = root_builder.sign(&root_signer).await.expect("failed to build root delegation");
+
+    // Build the second delegation extending the root
+    let second_builder = DelegationBuilder::extending(root)
+        .expect("failed to extend from root")
+        .command(["nil"]) // Inherits command by default, can be overridden
+        .audience(Did::key([0xde; 33])); // Default final audience
+
+    // Apply test-specific modifications to the second token
+    let second_builder = second_modifier(second_builder);
+
+    second_builder.sign(&key_signer).await.expect("failed to build second delegation")
+}
+
+/// Builds a standard two-token chain (`root delegation -> invocation`).
+pub(crate) async fn build_invocation_with_one_proof<F, G>(
+    delegation_modifier: F,
+    invocation_modifier: G,
+) -> NucTokenEnvelope<SignaturesValidated>
+where
+    F: FnOnce(DelegationBuilder) -> DelegationBuilder,
+    G: FnOnce(InvocationBuilder) -> InvocationBuilder,
+{
+    let subject_key = keypair();
+    let root_signer = root_signer();
+    let subject_signer = subject_key.signer(DidMethod::Key);
+    let subject_did = subject_key.to_did(DidMethod::Key);
+
+    // Build the root delegation with sensible defaults
+    let root_builder = DelegationBuilder::new().command(["nil"]).audience(subject_did.clone()).subject(subject_did);
+
+    // Apply test-specific modifications to the delegation
+    let root_builder = delegation_modifier(root_builder);
+
+    let root_delegation = root_builder.sign(&root_signer).await.expect("failed to build root delegation");
+
+    // Build the invocation extending the delegation
+    let invocation_builder = InvocationBuilder::extending(root_delegation)
+        .command(["nil"]) // Inherits command by default, can be overridden
+        .audience(Did::key([0xaa; 33])); // Default final audience
+
+    // Apply test-specific modifications to the invocation
+    let invocation_builder = invocation_modifier(invocation_builder);
+
+    invocation_builder.sign(&subject_signer).await.expect("failed to build invocation")
 }

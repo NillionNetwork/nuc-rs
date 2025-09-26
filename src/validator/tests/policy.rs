@@ -37,35 +37,17 @@ fn policy_properties(#[case] policy: crate::policy::Policy, #[case] expected: Po
 
 #[tokio::test]
 async fn root_policy_not_met() {
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-    let subject = key.to_did(DidMethod::Key);
-
-    // Root delegation with policy requiring ".foo" = 42
-    let root = DelegationBuilder::new()
-        .policy(policy::op::eq(".foo", json!(42)))
-        .subject(subject.clone())
-        .audience(key.to_did(DidMethod::Key))
-        .command(["nil"])
-        .sign(&root_signer)
-        .await
-        .expect("failed to build root");
-
-    // Invocation with arguments that don't meet the policy (has "bar": 1337 but no "foo": 42)
-    let invocation = InvocationBuilder::extending(root)
-        .arguments(json!({"bar": 1337}))
-        .audience(Did::key([0xaa; 33]))
-        .command(["nil"])
-        .sign(&key_signer)
-        .await
-        .expect("failed to build invocation");
+    let invocation = build_invocation_with_one_proof(
+        |delegation| delegation.policy(policy::op::eq(".foo", json!(42))),
+        |invocation| invocation.arguments(json!({ "bar": 1337 })),
+    )
+    .await;
 
     Asserter::default().assert_failure(invocation.unvalidate(), ValidationKind::PolicyNotMet);
 }
 
 #[tokio::test]
-async fn last_policy_not_met() {
+async fn intermediate_policy_not_met() {
     let subject_key = keypair();
     let invocation_key = keypair();
     let root_signer = root_signer();
@@ -112,60 +94,18 @@ async fn policy_too_deep() {
         policy = policy::op::not(policy);
     }
 
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-    let subject = key.to_did(DidMethod::Key);
+    let chain = build_two_link_delegation_chain(|root| root.policy(policy), |second| second).await;
 
-    // Root delegation with deeply nested policy
-    let root = DelegationBuilder::new()
-        .policy(policy)
-        .subject(subject.clone())
-        .audience(key.to_did(DidMethod::Key))
-        .command(["nil"])
-        .sign(&root_signer)
-        .await
-        .expect("failed to build root");
-
-    let tail = DelegationBuilder::extending(root)
-        .expect("failed to extend")
-        .audience(Did::key([0xde; 33]))
-        .command(["nil"])
-        .sign(&key_signer)
-        .await
-        .expect("failed to build tail");
-
-    Asserter::default().assert_failure(tail.unvalidate(), ValidationKind::PolicyTooDeep);
+    Asserter::default().assert_failure(chain.unvalidate(), ValidationKind::PolicyTooDeep);
 }
 
 #[tokio::test]
 async fn policy_array_too_wide() {
     let policies = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
 
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-    let subject = key.to_did(DidMethod::Key);
+    let chain = build_two_link_delegation_chain(|root| root.policies(policies), |second| second).await;
 
-    // Root delegation with too many policies
-    let mut root_builder =
-        DelegationBuilder::new().subject(subject.clone()).audience(key.to_did(DidMethod::Key)).command(["nil"]);
-
-    for policy in policies {
-        root_builder = root_builder.policy(policy);
-    }
-
-    let root = root_builder.sign(&root_signer).await.expect("failed to build root");
-
-    let tail = DelegationBuilder::extending(root)
-        .expect("failed to extend")
-        .audience(Did::key([0xde; 33]))
-        .command(["nil"])
-        .sign(&key_signer)
-        .await
-        .expect("failed to build tail");
-
-    Asserter::default().assert_failure(tail.unvalidate(), ValidationKind::PolicyTooWide);
+    Asserter::default().assert_failure(chain.unvalidate(), ValidationKind::PolicyTooWide);
 }
 
 #[tokio::test]
@@ -173,28 +113,7 @@ async fn policy_too_wide() {
     let policies = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
     let policy = policy::op::and(policies);
 
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-    let subject = key.to_did(DidMethod::Key);
+    let chain = build_two_link_delegation_chain(|root| root.policy(policy), |second| second).await;
 
-    // Root delegation with wide AND policy
-    let root = DelegationBuilder::new()
-        .policy(policy)
-        .subject(subject.clone())
-        .audience(key.to_did(DidMethod::Key))
-        .command(["nil"])
-        .sign(&root_signer)
-        .await
-        .expect("failed to build root");
-
-    let tail = DelegationBuilder::extending(root)
-        .expect("failed to extend")
-        .audience(Did::key([0xde; 33]))
-        .command(["nil"])
-        .sign(&key_signer)
-        .await
-        .expect("failed to build tail");
-
-    Asserter::default().assert_failure(tail.unvalidate(), ValidationKind::PolicyTooWide);
+    Asserter::default().assert_failure(chain.unvalidate(), ValidationKind::PolicyTooWide);
 }

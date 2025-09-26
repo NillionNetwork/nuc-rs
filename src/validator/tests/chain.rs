@@ -82,86 +82,39 @@ async fn chain_too_long() {
 
 #[tokio::test]
 async fn command_not_attenuated() {
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
+    let chain = build_two_link_delegation_chain(
+        |root| root.command(["nil"]),
+        |second| second.command(["bar"]), // Command /bar is not an attenuation if /nil
+    )
+    .await;
 
-    // Root delegation with "nil" command
-    let first = delegation(&key)
-        .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
-        .await
-        .expect("failed to build first");
-
-    // Second delegation with "bar" command (not an attenuation of "nil")
-    let second = DelegationBuilder::extending(first)
-        .expect("failed to extend")
-        .audience(Did::key([0xde; 33]))
-        .command(["bar"])
-        .sign(&key_signer)
-        .await
-        .expect("failed to build second");
-
-    Asserter::default().assert_failure(second.unvalidate(), ValidationKind::CommandNotAttenuated);
+    Asserter::default().assert_failure(chain.unvalidate(), ValidationKind::CommandNotAttenuated);
 }
 
 #[tokio::test]
 async fn issuer_audience_mismatch() {
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
+    let chain = build_two_link_delegation_chain(
+        |root| root.audience(Did::key([0xaa; 33])), // Set a specific audience
+        |second| second,                            // The second link's issuer will not match the root's audience
+    )
+    .await;
 
-    // First delegation with an audience that does not match the next issuer
-    let first = delegation(&key)
-        .command(["nil"])
-        .audience(Did::key([0xaa; 33])) // Mismatched audience
-        .sign(&root_signer)
-        .await
-        .expect("failed to build first");
-
-    // Second delegation extends the first. The builder ensures its issuer (`key_signer`)
-    // must match the first token's audience. Since it doesn't, validation will fail.
-    let second = DelegationBuilder::extending(first)
-        .expect("failed to extend")
-        .audience(Did::key([0xde; 33])) // This audience doesn't matter for the test
-        .sign(&key_signer)
-        .await
-        .expect("failed to build second");
-
-    Asserter::default().assert_failure(second.unvalidate(), ValidationKind::IssuerAudienceMismatch);
+    Asserter::default().assert_failure(chain.unvalidate(), ValidationKind::IssuerAudienceMismatch);
 }
 
 #[tokio::test]
 async fn invalid_audience_invocation() {
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-
     let expected_did = Did::key([0xaa; 33]);
     let actual_did = Did::key([0xbb; 33]);
 
-    // Build delegation
-    let first = delegation(&key)
-        .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
-        .await
-        .expect("failed to build delegation");
-
-    // Build invocation with wrong audience
-    let second = InvocationBuilder::extending(first)
-        .command(["nil"])
-        .audience(actual_did)
-        .sign(&key_signer)
-        .await
-        .expect("failed to build invocation");
+    let invocation =
+        build_invocation_with_one_proof(|delegation| delegation, |invocation| invocation.audience(actual_did)).await;
 
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Invocation(expected_did),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::InvalidAudience);
+    Asserter::new(parameters).assert_failure(invocation.unvalidate(), ValidationKind::InvalidAudience);
 }
 
 #[tokio::test]
@@ -189,35 +142,16 @@ async fn invalid_signature() {
 
 #[tokio::test]
 async fn invalid_audience_delegation() {
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-
     let expected_did = Did::key([0xaa; 33]);
     let actual_did = Did::key([0xbb; 33]);
 
-    // Build first delegation
-    let first = delegation(&key)
-        .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
-        .await
-        .expect("failed to build first");
-
-    // Build second delegation with wrong audience
-    let second = DelegationBuilder::extending(first)
-        .expect("failed to extend")
-        .command(["nil"])
-        .audience(actual_did)
-        .sign(&key_signer)
-        .await
-        .expect("failed to build second");
+    let chain = build_two_link_delegation_chain(|root| root, |second| second.audience(actual_did)).await;
 
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Delegation(expected_did),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::InvalidAudience);
+    Asserter::new(parameters).assert_failure(chain.unvalidate(), ValidationKind::InvalidAudience);
 }
 
 #[tokio::test]
@@ -251,59 +185,24 @@ async fn missing_proof() {
 
 #[tokio::test]
 async fn need_delegation() {
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-
-    // Build delegation then invocation
-    let first = delegation(&key)
-        .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
-        .await
-        .expect("failed to build delegation");
-
-    let second = InvocationBuilder::extending(first)
-        .command(["nil"])
-        .audience(Did::key([0xde; 33]))
-        .sign(&key_signer)
-        .await
-        .expect("failed to build invocation");
+    let invocation = build_invocation_with_one_proof(|delegation| delegation, |invocation| invocation).await;
 
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Delegation(Did::key([0xaa; 33])),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::NeedDelegation);
+    Asserter::new(parameters).assert_failure(invocation.unvalidate(), ValidationKind::NeedDelegation);
 }
 
 #[tokio::test]
 async fn need_invocation() {
-    let key = keypair();
-    let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
-
-    // Build delegation chain
-    let first = delegation(&key)
-        .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
-        .await
-        .expect("failed to build first");
-
-    let second = DelegationBuilder::extending(first)
-        .expect("failed to extend")
-        .audience(Did::key([0xde; 33]))
-        .command(["nil"])
-        .sign(&key_signer)
-        .await
-        .expect("failed to build second");
+    let chain = build_two_link_delegation_chain(|root| root, |second| second).await;
 
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Invocation(Did::key([0xaa; 33])),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::NeedInvocation);
+    Asserter::new(parameters).assert_failure(chain.unvalidate(), ValidationKind::NeedInvocation);
 }
 
 #[tokio::test]
@@ -434,30 +333,15 @@ async fn valid_token() {
 
 #[tokio::test]
 async fn valid_revocation_token() {
-    let subject_key = keypair();
-    let root_signer = root_signer();
-    let subject_signer = subject_key.signer(DidMethod::Key);
-    let subject = subject_key.to_did(DidMethod::Key);
     let rpc_did = Did::key([0xaa; 33]);
 
-    // Root delegation with policy
-    let root = DelegationBuilder::new()
-        .policy(policy::op::eq(".args.foo", json!(42)))
-        .subject(subject.clone())
-        .audience(subject.clone())
-        .command(["nil"])
-        .sign(&root_signer)
-        .await
-        .expect("failed to build root");
-
-    // Revocation invocation
-    let invocation = InvocationBuilder::extending(root)
-        .arguments(json!({"foo": 42, "bar": 1337}))
-        .audience(rpc_did.clone())
-        .command(["nuc", "revoke"])
-        .sign(&subject_signer)
-        .await
-        .expect("failed to build invocation");
+    let invocation = build_invocation_with_one_proof(
+        |delegation| delegation.policy(policy::op::eq(".args.foo", json!(42))),
+        |invocation| {
+            invocation.arguments(json!({ "foo": 42, "bar": 1337 })).audience(rpc_did.clone()).command(["nuc", "revoke"])
+        },
+    )
+    .await;
 
     let parameters =
         ValidationParameters { token_requirements: TokenTypeRequirements::Invocation(rpc_did), ..Default::default() };
