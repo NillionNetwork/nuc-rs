@@ -5,7 +5,7 @@ use crate::{
     signer::{Signer, SigningError},
     token::{Command, JsonObject, NucToken, TokenBody},
 };
-use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::time::Duration;
@@ -212,12 +212,11 @@ mod tests {
     use super::*;
     use crate::signer::Eip712Signer;
     use crate::{
-        Signer,
+        Signer, Signer,
         did::Did,
-        envelope::{from_base64, NucTokenEnvelope},
+        envelope::{NucTokenEnvelope, from_base64},
         policy,
         signer::{DidMethod, Secp256k1Signer},
-        Signer,
     };
     use ethers::prelude::LocalWallet;
     use ethers::types::transaction::eip712::EIP712Domain;
