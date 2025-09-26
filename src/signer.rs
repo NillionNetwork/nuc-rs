@@ -135,7 +135,8 @@ impl<S: EthersSigner + Send + Sync> Signer for Eip712Signer<S> {
 #[cfg(test)]
 mod eip712_tests {
     use super::*;
-    use crate::{builder::NucTokenBuilder, envelope::NucTokenEnvelope};
+    use crate::builder::DelegationBuilder;
+    use crate::envelope::NucTokenEnvelope;
     use ethers::signers::{LocalWallet, Signer as EthersSigner};
 
     #[tokio::test]
@@ -155,11 +156,11 @@ mod eip712_tests {
         let aud_did = Did::ethr(address);
         let sub_did = Did::ethr(address);
 
-        let nuc_string = NucTokenBuilder::delegation(vec![])
+        let nuc_string = DelegationBuilder::new()
             .audience(aud_did.clone())
             .subject(sub_did.clone())
             .command(&[] as &[&str])
-            .build(&signer)
+            .sign_and_serialize(&signer)
             .await
             .expect("failed to build nuc");
 

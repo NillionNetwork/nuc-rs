@@ -1,61 +1,24 @@
 use super::*;
 use crate::{
-    builder::{NucTokenBuilder, to_base64},
+    builder::{DelegationBuilder, InvocationBuilder, NucTokenBuildError, to_base64},
     did::Did,
     envelope::from_base64,
+    keypair::Keypair,
     policy,
     signer::{DidMethod, Secp256k1Signer},
     validator::policy::PolicyTreeProperties,
 };
-use k256::SecretKey;
 use rstest::rstest;
 use serde::Serialize;
 use serde_json::json;
 use serde_with::{DisplayFromStr, serde_as};
-use std::{env, ops::Deref, sync::LazyLock};
+use std::{env, sync::LazyLock};
 
-static ROOT_SECRET_KEYS: LazyLock<Vec<SecretKey>> = LazyLock::new(|| vec![SecretKey::random(&mut rand::thread_rng())]);
-static ROOT_PUBLIC_KEYS: LazyLock<Vec<PublicKey>> =
-    LazyLock::new(|| ROOT_SECRET_KEYS.iter().map(|s| s.public_key()).collect());
-
-// A helper to chain tokens together.
-struct Chainer {
-    chain_issuer_audience: bool,
-}
-
-impl Default for Chainer {
-    fn default() -> Self {
-        Self { chain_issuer_audience: true }
-    }
-}
-
-impl Chainer {
-    async fn chain<const N: usize>(&self, mut builders: [Builder; N]) -> NucTokenEnvelope {
-        if self.chain_issuer_audience {
-            // Chain the issuer -> audience in every token
-            for i in 0..builders.len().saturating_sub(1) {
-                let next = &builders[i + 1];
-                let issuer_key: [u8; 33] = next.owner_key.public_key().to_sec1_bytes().deref().try_into().unwrap();
-
-                let previous = &mut builders[i];
-                previous.builder = previous.builder.clone().audience(Did::key(issuer_key));
-            }
-        }
-
-        // Now chain the proof hashes
-        let mut builders = builders.into_iter();
-        let token = builders.next().expect("no builders").build().await;
-        let mut envelope = NucTokenEnvelope::decode(&token).unwrap();
-        for mut builder in builders {
-            let next = envelope.validate_signatures().expect("signature validation failed");
-            builder.builder = builder.builder.proof(next);
-
-            let token = builder.build().await;
-            envelope = NucTokenEnvelope::decode(&token).unwrap();
-        }
-        envelope
-    }
-}
+static ROOT_KEYPAIR: LazyLock<Keypair> = LazyLock::new(Keypair::generate);
+static ROOT_PUBLIC_KEYS: LazyLock<Vec<PublicKey>> = LazyLock::new(|| {
+    let key = ROOT_KEYPAIR.public_key();
+    vec![PublicKey::from_sec1_bytes(&key).expect("valid public key")]
+});
 
 enum TimeConfig {
     System,
@@ -208,48 +171,24 @@ impl Default for Asserter {
     }
 }
 
-struct Builder {
-    builder: NucTokenBuilder,
-    owner_key: SecretKey,
+fn keypair() -> Keypair {
+    Keypair::generate()
 }
 
-impl Builder {
-    async fn build(self) -> String {
-        let signer = Secp256k1Signer::new(self.owner_key.into(), DidMethod::Key);
-        self.builder.build(&signer).await.expect("failed to build")
-    }
-}
-
-trait NucTokenBuilderExt: Sized {
-    fn issued_by_root(self) -> Builder;
-    fn issued_by(self, owner_key: SecretKey) -> Builder;
-}
-
-impl NucTokenBuilderExt for NucTokenBuilder {
-    fn issued_by_root(self) -> Builder {
-        Builder { builder: self, owner_key: ROOT_SECRET_KEYS[0].clone() }
-    }
-
-    fn issued_by(self, owner_key: SecretKey) -> Builder {
-        Builder { builder: self, owner_key }
-    }
-}
-
-fn secret_key() -> SecretKey {
-    SecretKey::random(&mut rand::thread_rng())
+fn root_signer() -> Secp256k1Signer {
+    ROOT_KEYPAIR.signer(DidMethod::Key)
 }
 
 // Create a delegation with the most common fields already set so we don't need to deal
 // with them in every single test.
-fn delegation(subject: &SecretKey) -> NucTokenBuilder {
-    let subject_pk: [u8; 33] = subject.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    NucTokenBuilder::delegation([]).audience(Did::key([0xde; 33])).subject(Did::key(subject_pk))
+fn delegation(subject: &Keypair) -> DelegationBuilder {
+    DelegationBuilder::new().audience(Did::key([0xde; 33])).subject(subject.to_did(DidMethod::Key))
 }
 
 // Same as the above but for invocations
-fn invocation(subject: &SecretKey) -> NucTokenBuilder {
-    let subject_pk: [u8; 33] = subject.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    NucTokenBuilder::invocation(Default::default()).audience(Did::key([0xde; 33])).subject(Did::key(subject_pk))
+#[allow(dead_code)]
+fn invocation(subject: &Keypair) -> InvocationBuilder {
+    InvocationBuilder::new().audience(Did::key([0xde; 33])).subject(subject.to_did(DidMethod::Key))
 }
 
 #[rstest]
@@ -280,84 +219,166 @@ fn policy_properties(#[case] policy: crate::policy::Policy, #[case] expected: Po
 
 #[tokio::test]
 async fn unlinked_chain() {
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    // Chain 2.
-    let envelope =
-        Chainer::default().chain([base.clone().issued_by_root(), base.clone().issued_by(key)]).await.encode();
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
 
-    // Now chain an extra one that nobody refers to.
-    let last = base.clone().issued_by_root().build().await;
-    let token = format!("{envelope}/{last}");
+    // Build the first delegation token
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Build the second token extending the first
+    let second = DelegationBuilder::extending(first.clone())
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    // Now add an unlinked token (not chained properly)
+    let unlinked =
+        delegation(&key).command(["nil"]).sign_and_serialize(&root_signer).await.expect("failed to build unlinked");
+
+    // Manually construct an envelope with the unlinked proof
+    let second_encoded = second.unvalidate().encode();
+    let token = format!("{}/{}", second_encoded, unlinked);
     let envelope = NucTokenEnvelope::decode(&token).expect("decode failed");
     Asserter::default().assert_failure(envelope, ValidationKind::UnchainedProofs);
 }
 
 #[tokio::test]
 async fn chain_too_long() {
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let last = base.clone();
-    let envelope = Chainer::default()
-        .chain([base.clone().issued_by_root(), base.clone().issued_by(key.clone()), last.issued_by(key.clone())])
-        .await;
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // Build first token
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Build second token extending first
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(key.to_did(DidMethod::Key))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    // Build third token extending second
+    let third = DelegationBuilder::extending(second)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build third");
+
     let parameters = ValidationParameters { max_chain_length: 2, ..Default::default() };
-    Asserter::new(parameters).assert_failure(envelope, ValidationKind::ChainTooLong);
+    Asserter::new(parameters).assert_failure(third.unvalidate(), ValidationKind::ChainTooLong);
 }
 
 #[tokio::test]
 async fn command_not_attenuated() {
-    let key = secret_key();
-    let base = delegation(&key);
-    let root = base.clone().command(["nil"]).issued_by_root();
-    let last = base.command(["bar"]).issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::CommandNotAttenuated);
-}
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
 
-#[tokio::test]
-async fn different_subjects() {
-    let key1 = secret_key();
-    let mut key2_bytes = key1.to_bytes();
-    key2_bytes[0] ^= 1;
-    let key2 = SecretKey::from_bytes(&key2_bytes).unwrap();
+    // Root delegation with "nil" command
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
 
-    let root = delegation(&key1).command(["nil"]).issued_by_root();
-    let last = delegation(&key2).command(["nil"]).issued_by(key2);
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::DifferentSubjects);
+    // Second delegation with "bar" command (not an attenuation of "nil")
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["bar"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().assert_failure(second.unvalidate(), ValidationKind::CommandNotAttenuated);
 }
 
 #[tokio::test]
 async fn issuer_audience_mismatch() {
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().audience(Did::key([0xaa; 33])).issued_by_root();
-    let last = base.issued_by(key);
-    let envelope = Chainer { chain_issuer_audience: false }.chain([root, last]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::IssuerAudienceMismatch);
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // First delegation with an audience that does not match the next issuer
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(Did::key([0xaa; 33])) // Mismatched audience
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Second delegation extends the first. The builder ensures its issuer (`key_signer`)
+    // must match the first token's audience. Since it doesn't, validation will fail.
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33])) // This audience doesn't matter for the test
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().assert_failure(second.unvalidate(), ValidationKind::IssuerAudienceMismatch);
 }
 
 #[tokio::test]
 async fn invalid_audience_invocation() {
-    let key = secret_key();
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
     let expected_did = Did::key([0xaa; 33]);
     let actual_did = Did::key([0xbb; 33]);
-    let root = delegation(&key).command(["nil"]).issued_by_root();
-    let last = invocation(&key).command(["nil"]).audience(actual_did).issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
+
+    // Build delegation
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build delegation");
+
+    // Build invocation with wrong audience
+    let second = InvocationBuilder::extending(first)
+        .command(["nil"])
+        .audience(actual_did)
+        .sign(&key_signer)
+        .await
+        .expect("failed to build invocation");
+
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Invocation(expected_did),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(envelope, ValidationKind::InvalidAudience);
+    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::InvalidAudience);
 }
 
 #[tokio::test]
 async fn invalid_signature() {
-    let key = secret_key();
-    let root = delegation(&key).command(["nil"]).issued_by_root();
-    let token = Chainer::default().chain([root]).await.encode();
+    let key = keypair();
+    let root_signer = root_signer();
+
+    let envelope = delegation(&key).command(["nil"]).sign(&root_signer).await.expect("failed to build");
+
+    let token = envelope.unvalidate().encode();
     let (base, signature) = token.rsplit_once(".").unwrap();
 
     // Change a byte in the signature
@@ -367,6 +388,7 @@ async fn invalid_signature() {
     let signature = to_base64(&signature);
     let token = format!("{base}.{signature}");
     let envelope = NucTokenEnvelope::decode(&token).expect("decode failed");
+
     // Don't require a root key signature
     let asserter = Asserter { root_keys: Vec::new(), ..Default::default() };
     asserter.assert_failure(envelope, ValidationKind::InvalidSignatures);
@@ -374,25 +396,61 @@ async fn invalid_signature() {
 
 #[tokio::test]
 async fn invalid_audience_delegation() {
-    let key = secret_key();
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
     let expected_did = Did::key([0xaa; 33]);
     let actual_did = Did::key([0xbb; 33]);
-    let root = delegation(&key).command(["nil"]).issued_by_root();
-    let last = delegation(&key).command(["nil"]).audience(actual_did).issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
+
+    // Build first delegation
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Build second delegation with wrong audience
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .command(["nil"])
+        .audience(actual_did)
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Delegation(expected_did),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(envelope, ValidationKind::InvalidAudience);
+    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::InvalidAudience);
 }
 
 #[tokio::test]
 async fn missing_proof() {
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let token = Chainer::default().chain([base.clone().issued_by_root(), base.clone().issued_by(key)]).await.encode();
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // Build chain
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
     // Keep the token without its proof
+    let token = second.unvalidate().encode();
     let token = token.split_once("/").unwrap().0;
     let envelope = NucTokenEnvelope::decode(token).expect("invalid token");
     Asserter::default().assert_failure(envelope, ValidationKind::MissingProof);
@@ -400,29 +458,59 @@ async fn missing_proof() {
 
 #[tokio::test]
 async fn need_delegation() {
-    let key = secret_key();
-    let root = delegation(&key).command(["nil"]).issued_by_root();
-    let last = invocation(&key).command(["nil"]).issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // Build delegation then invocation
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build delegation");
+
+    let second = InvocationBuilder::extending(first)
+        .command(["nil"])
+        .audience(Did::key([0xde; 33]))
+        .sign(&key_signer)
+        .await
+        .expect("failed to build invocation");
+
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Delegation(Did::key([0xaa; 33])),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(envelope, ValidationKind::NeedDelegation);
+    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::NeedDelegation);
 }
 
 #[tokio::test]
 async fn need_invocation() {
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().issued_by_root();
-    let last = base.issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // Build delegation chain
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
     let parameters = ValidationParameters {
         token_requirements: TokenTypeRequirements::Invocation(Did::key([0xaa; 33])),
         ..Default::default()
     };
-    Asserter::new(parameters).assert_failure(envelope, ValidationKind::NeedInvocation);
+    Asserter::new(parameters).assert_failure(second.unvalidate(), ValidationKind::NeedInvocation);
 }
 
 #[tokio::test]
@@ -431,12 +519,30 @@ async fn not_before_backwards() {
     let root_not_before = DateTime::from_timestamp(5, 0).unwrap();
     let last_not_before = DateTime::from_timestamp(3, 0).unwrap();
 
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().not_before(root_not_before).issued_by_root();
-    let last = base.not_before(last_not_before).issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::NotBeforeBackwards);
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // First token with not_before = 5
+    let first = delegation(&key)
+        .command(["nil"])
+        .not_before(root_not_before)
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Second token with not_before = 3 (backwards)
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .not_before(last_not_before)
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().with_current_time(now).assert_failure(second.unvalidate(), ValidationKind::NotBeforeBackwards);
 }
 
 #[tokio::test]
@@ -444,12 +550,28 @@ async fn proof_not_before_not_met() {
     let now = DateTime::from_timestamp(0, 0).unwrap();
     let not_before = DateTime::from_timestamp(10, 0).unwrap();
 
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().not_before(not_before).issued_by_root();
-    let last = base.issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::NotBeforeNotMet);
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // First token with not_before in the future
+    let first = delegation(&key)
+        .command(["nil"])
+        .not_before(not_before)
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().with_current_time(now).assert_failure(second.unvalidate(), ValidationKind::NotBeforeNotMet);
 }
 
 #[tokio::test]
@@ -457,51 +579,97 @@ async fn last_not_before_not_met() {
     let now = DateTime::from_timestamp(0, 0).unwrap();
     let not_before = DateTime::from_timestamp(10, 0).unwrap();
 
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().issued_by_root();
-    let last = base.not_before(not_before).issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::NotBeforeNotMet);
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Second token with not_before in the future
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .not_before(not_before)
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().with_current_time(now).assert_failure(second.unvalidate(), ValidationKind::NotBeforeNotMet);
 }
 
 #[tokio::test]
 async fn root_policy_not_met() {
-    let key = secret_key();
-    let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
-    let root = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+    let subject = key.to_did(DidMethod::Key);
+
+    // Root delegation with policy requiring ".foo" = 42
+    let root = DelegationBuilder::new()
+        .policy(policy::op::eq(".foo", json!(42)))
         .subject(subject.clone())
+        .audience(key.to_did(DidMethod::Key))
         .command(["nil"])
-        .issued_by_root();
-    let invocation = NucTokenBuilder::invocation(json!({"bar": 1337}).as_object().cloned().unwrap())
-        .subject(subject)
+        .sign(&root_signer)
+        .await
+        .expect("failed to build root");
+
+    // Invocation with arguments that don't meet the policy (has "bar": 1337 but no "foo": 42)
+    let invocation = InvocationBuilder::extending(root)
+        .arguments(json!({"bar": 1337}))
         .audience(Did::key([0xaa; 33]))
         .command(["nil"])
-        .issued_by(key);
+        .sign(&key_signer)
+        .await
+        .expect("failed to build invocation");
 
-    let envelope = Chainer::default().chain([root, invocation]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::PolicyNotMet);
+    Asserter::default().assert_failure(invocation.unvalidate(), ValidationKind::PolicyNotMet);
 }
 
 #[tokio::test]
 async fn last_policy_not_met() {
-    let subject_key = secret_key();
-    let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
-    let root = NucTokenBuilder::delegation([]).subject(subject.clone()).command(["nil"]).issued_by_root();
-    let intermediate = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
+    let subject_key = keypair();
+    let invocation_key = keypair();
+    let root_signer = root_signer();
+    let subject_signer = subject_key.signer(DidMethod::Key);
+    let invocation_signer = invocation_key.signer(DidMethod::Key);
+    let subject = subject_key.to_did(DidMethod::Key);
+
+    // Root delegation without policy
+    let root = DelegationBuilder::new()
         .subject(subject.clone())
+        .audience(subject_key.to_did(DidMethod::Key))
         .command(["nil"])
-        .issued_by(subject_key);
-    let invocation = NucTokenBuilder::invocation(json!({"bar": 1337}).as_object().cloned().unwrap())
-        .subject(subject)
+        .sign(&root_signer)
+        .await
+        .expect("failed to build root");
+
+    // Intermediate delegation with policy requiring ".foo" = 42
+    let intermediate = DelegationBuilder::extending(root)
+        .expect("failed to extend")
+        .policy(policy::op::eq(".foo", json!(42)))
+        .audience(invocation_key.to_did(DidMethod::Key))
+        .command(["nil"])
+        .sign(&subject_signer)
+        .await
+        .expect("failed to build intermediate");
+
+    // Invocation with arguments that don't meet the policy
+    let invocation = InvocationBuilder::extending(intermediate)
+        .arguments(json!({"bar": 1337}))
         .audience(Did::key([0xaa; 33]))
         .command(["nil"])
-        .issued_by(secret_key());
+        .sign(&invocation_signer)
+        .await
+        .expect("failed to build invocation");
 
-    let envelope = Chainer::default().chain([root, intermediate, invocation]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::PolicyNotMet);
+    Asserter::default().assert_failure(invocation.unvalidate(), ValidationKind::PolicyNotMet);
 }
 
 #[tokio::test]
@@ -511,81 +679,166 @@ async fn policy_too_deep() {
     for _ in 0..MAX_POLICY_DEPTH {
         policy = policy::op::not(policy);
     }
-    let key = SecretKey::random(&mut rand::thread_rng());
-    let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
-    let root = NucTokenBuilder::delegation([policy]).subject(subject.clone()).command(["nil"]).issued_by_root();
-    let tail = delegation(&key).command(["nil"]).issued_by(key);
 
-    let envelope = Chainer::default().chain([root, tail]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::PolicyTooDeep);
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+    let subject = key.to_did(DidMethod::Key);
+
+    // Root delegation with deeply nested policy
+    let root = DelegationBuilder::new()
+        .policy(policy)
+        .subject(subject.clone())
+        .audience(key.to_did(DidMethod::Key))
+        .command(["nil"])
+        .sign(&root_signer)
+        .await
+        .expect("failed to build root");
+
+    let tail = DelegationBuilder::extending(root)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build tail");
+
+    Asserter::default().assert_failure(tail.unvalidate(), ValidationKind::PolicyTooDeep);
 }
 
 #[tokio::test]
 async fn policy_array_too_wide() {
-    let policy = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
-    let key = SecretKey::random(&mut rand::thread_rng());
-    let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
-    let root = NucTokenBuilder::delegation(policy).subject(subject.clone()).command(["nil"]).issued_by_root();
-    let tail = delegation(&key).command(["nil"]).issued_by(key);
-    let envelope = Chainer::default().chain([root, tail]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::PolicyTooWide);
+    let policies = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
+
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+    let subject = key.to_did(DidMethod::Key);
+
+    // Root delegation with too many policies
+    let mut root_builder =
+        DelegationBuilder::new().subject(subject.clone()).audience(key.to_did(DidMethod::Key)).command(["nil"]);
+
+    for policy in policies {
+        root_builder = root_builder.policy(policy);
+    }
+
+    let root = root_builder.sign(&root_signer).await.expect("failed to build root");
+
+    let tail = DelegationBuilder::extending(root)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build tail");
+
+    Asserter::default().assert_failure(tail.unvalidate(), ValidationKind::PolicyTooWide);
 }
 
 #[tokio::test]
 async fn policy_too_wide() {
-    let policy = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
-    let policy = policy::op::and(policy);
-    let key = SecretKey::random(&mut rand::thread_rng());
-    let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
-    let root = NucTokenBuilder::delegation([policy]).subject(subject.clone()).command(["nil"]).issued_by_root();
-    let tail = delegation(&key).command(["nil"]).issued_by(key);
-    let envelope = Chainer::default().chain([root, tail]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::PolicyTooWide);
+    let policies = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
+    let policy = policy::op::and(policies);
+
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+    let subject = key.to_did(DidMethod::Key);
+
+    // Root delegation with wide AND policy
+    let root = DelegationBuilder::new()
+        .policy(policy)
+        .subject(subject.clone())
+        .audience(key.to_did(DidMethod::Key))
+        .command(["nil"])
+        .sign(&root_signer)
+        .await
+        .expect("failed to build root");
+
+    let tail = DelegationBuilder::extending(root)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build tail");
+
+    Asserter::default().assert_failure(tail.unvalidate(), ValidationKind::PolicyTooWide);
 }
 
 #[tokio::test]
 async fn proofs_must_be_delegations() {
-    let key = secret_key();
-    let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
-    let root = NucTokenBuilder::invocation(json!({"bar": 1337}).as_object().cloned().unwrap())
-        .subject(subject.clone())
-        .command(["nil"])
-        .issued_by_root();
-    let last = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
-        .subject(subject)
-        .audience(Did::key([0xaa; 33]))
-        .command(["nil"])
-        .issued_by(key);
+    let key = keypair();
+    let root_signer = root_signer();
+    let subject = key.to_did(DidMethod::Key);
 
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::ProofsMustBeDelegations);
+    // Root is an invocation
+    let root_invocation = InvocationBuilder::new()
+        .arguments(json!({"bar": 1337}))
+        .subject(subject.clone())
+        .audience(key.to_did(DidMethod::Key))
+        .command(["nil"])
+        .sign(&root_signer)
+        .await
+        .expect("failed to build root invocation");
+
+    // Attempting to create a delegation from an invocation proof should fail.
+    let result = DelegationBuilder::extending(root_invocation);
+
+    assert!(matches!(result, Err(NucTokenBuildError::CannotExtendInvocation)));
 }
 
 #[tokio::test]
 async fn root_key_signature_missing() {
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().issued_by(key.clone());
-    let last = base.issued_by(key);
+    let key = keypair();
+    let key_signer = key.signer(DidMethod::Key);
 
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::RootKeySignatureMissing);
+    // First delegation signed by non-root key
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&key_signer)
+        .await
+        .expect("failed to build first");
+
+    // Second delegation
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().assert_failure(second.unvalidate(), ValidationKind::RootKeySignatureMissing);
 }
 
 #[tokio::test]
 async fn subject_not_in_chain() {
-    let subject_key = secret_key();
-    let key = secret_key();
-    let base = delegation(&subject_key).command(["nil"]);
-    let root = base.clone().issued_by_root();
-    let last = base.issued_by(key);
+    let subject_key = keypair();
+    let other_key = keypair();
+    let root_signer = root_signer();
+    let other_signer = other_key.signer(DidMethod::Key);
 
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().assert_failure(envelope, ValidationKind::SubjectNotInChain);
+    // Root delegation with subject_key as subject
+    let first = delegation(&subject_key)
+        .command(["nil"])
+        .audience(other_key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Second delegation signed by other_key (not subject_key)
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&other_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().assert_failure(second.unvalidate(), ValidationKind::SubjectNotInChain);
 }
 
 #[tokio::test]
@@ -593,12 +846,28 @@ async fn root_token_expired() {
     let now = DateTime::from_timestamp(10, 0).unwrap();
     let expires_at = DateTime::from_timestamp(5, 0).unwrap();
 
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().expires_at(expires_at).issued_by_root();
-    let last = base.issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::TokenExpired);
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    // First token with expiration in the past
+    let first = delegation(&key)
+        .command(["nil"])
+        .expires_at(expires_at)
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().with_current_time(now).assert_failure(second.unvalidate(), ValidationKind::TokenExpired);
 }
 
 #[tokio::test]
@@ -606,93 +875,139 @@ async fn last_token_expired() {
     let now = DateTime::from_timestamp(10, 0).unwrap();
     let expires_at = DateTime::from_timestamp(5, 0).unwrap();
 
-    let key = secret_key();
-    let base = delegation(&key).command(["nil"]);
-    let root = base.clone().issued_by_root();
-    let last = base.expires_at(expires_at).issued_by(key);
-    let envelope = Chainer::default().chain([root, last]).await;
-    Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::TokenExpired);
+    let key = keypair();
+    let root_signer = root_signer();
+    let key_signer = key.signer(DidMethod::Key);
+
+    let first = delegation(&key)
+        .command(["nil"])
+        .audience(key.to_did(DidMethod::Key))
+        .sign(&root_signer)
+        .await
+        .expect("failed to build first");
+
+    // Second token with expiration in the past
+    let second = DelegationBuilder::extending(first)
+        .expect("failed to extend")
+        .audience(Did::key([0xde; 33]))
+        .command(["nil"])
+        .expires_at(expires_at)
+        .sign(&key_signer)
+        .await
+        .expect("failed to build second");
+
+    Asserter::default().with_current_time(now).assert_failure(second.unvalidate(), ValidationKind::TokenExpired);
 }
 
 #[tokio::test]
 async fn valid_token() {
-    let subject_key = SecretKey::random(&mut rand::thread_rng());
-    let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
+    let subject_key = keypair();
+    let invocation_key = keypair();
+    let root_signer = root_signer();
+    let subject_signer = subject_key.signer(DidMethod::Key);
+    let invocation_signer = invocation_key.signer(DidMethod::Key);
+    let subject = subject_key.to_did(DidMethod::Key);
     let rpc_did = Did::key([0xaa; 33]);
-    let root =
-        NucTokenBuilder::delegation([policy::op::eq(".args.foo", json!(42)), policy::op::eq("$.req.bar", json!(1337))])
-            .subject(subject.clone())
-            .command(["nil"])
-            .issued_by_root();
-    let intermediate = NucTokenBuilder::delegation([policy::op::eq(".args.bar", json!(1337))])
+
+    // Root delegation with policies
+    let root = DelegationBuilder::new()
+        .policies(vec![policy::op::eq(".args.foo", json!(42)), policy::op::eq("$.req.bar", json!(1337))])
         .subject(subject.clone())
+        .audience(subject.clone())
+        .command(["nil"])
+        .sign(&root_signer)
+        .await
+        .expect("failed to build root");
+
+    // Intermediate delegation with additional policy
+    let intermediate = DelegationBuilder::extending(root)
+        .expect("failed to extend")
+        .policy(policy::op::eq(".args.bar", json!(1337)))
+        .audience(invocation_key.to_did(DidMethod::Key))
         .command(["nil", "bar"])
-        .issued_by(subject_key);
-    let invocation_key = secret_key();
-    let invocation = NucTokenBuilder::invocation(json!({"foo": 42, "bar": 1337}).as_object().cloned().unwrap())
-        .subject(subject.clone())
+        .sign(&subject_signer)
+        .await
+        .expect("failed to build intermediate");
+
+    // Invocation with arguments meeting all policies
+    let invocation = InvocationBuilder::extending(intermediate)
+        .arguments(json!({"foo": 42, "bar": 1337}))
         .audience(rpc_did.clone())
         .command(["nil", "bar", "foo"])
-        .issued_by(invocation_key.clone());
+        .sign(&invocation_signer)
+        .await
+        .expect("failed to build invocation");
 
-    let envelope = Chainer::default().chain([root, intermediate, invocation]).await;
     let parameters =
         ValidationParameters { token_requirements: TokenTypeRequirements::Invocation(rpc_did), ..Default::default() };
     let context = HashMap::from([("req", json!({"bar": 1337}))]);
-    let ValidatedNucToken { token, proofs } = Asserter::new(parameters).with_context(context).assert_success(envelope);
-    let invocation_issuer_pk: [u8; 33] = invocation_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    assert_eq!(token.issuer, Did::key(invocation_issuer_pk));
+    let ValidatedNucToken { token, proofs } =
+        Asserter::new(parameters).with_context(context).assert_success(invocation.unvalidate());
+
+    assert_eq!(token.issuer, invocation_key.to_did(DidMethod::Key));
 
     // Ensure the order is right
     assert_eq!(proofs[0].issuer, subject);
-    let root_issuer_pk: [u8; 33] = ROOT_SECRET_KEYS[0].public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    assert_eq!(proofs[1].issuer, Did::key(root_issuer_pk));
+    assert_eq!(proofs[1].issuer, ROOT_KEYPAIR.to_did(DidMethod::Key));
 }
 
 #[tokio::test]
 async fn valid_revocation_token() {
-    let subject_key = SecretKey::random(&mut rand::thread_rng());
-    let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
+    let subject_key = keypair();
+    let root_signer = root_signer();
+    let subject_signer = subject_key.signer(DidMethod::Key);
+    let subject = subject_key.to_did(DidMethod::Key);
     let rpc_did = Did::key([0xaa; 33]);
-    let root = NucTokenBuilder::delegation([policy::op::eq(".args.foo", json!(42))])
+
+    // Root delegation with policy
+    let root = DelegationBuilder::new()
+        .policy(policy::op::eq(".args.foo", json!(42)))
         .subject(subject.clone())
+        .audience(subject.clone())
         .command(["nil"])
-        .issued_by_root();
-    let invocation = NucTokenBuilder::invocation(json!({"foo": 42, "bar": 1337}).as_object().cloned().unwrap())
-        .subject(subject.clone())
+        .sign(&root_signer)
+        .await
+        .expect("failed to build root");
+
+    // Revocation invocation
+    let invocation = InvocationBuilder::extending(root)
+        .arguments(json!({"foo": 42, "bar": 1337}))
         .audience(rpc_did.clone())
         .command(["nuc", "revoke"])
-        .issued_by(subject_key);
+        .sign(&subject_signer)
+        .await
+        .expect("failed to build invocation");
 
-    let envelope = Chainer::default().chain([root, invocation]).await;
     let parameters =
         ValidationParameters { token_requirements: TokenTypeRequirements::Invocation(rpc_did), ..Default::default() };
-    Asserter::new(parameters).assert_success(envelope);
+    Asserter::new(parameters).assert_success(invocation.unvalidate());
 }
 
 #[tokio::test]
 async fn valid_no_root_keys_needed() {
-    let subject_key = SecretKey::random(&mut rand::thread_rng());
-    let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
-    let subject = Did::key(subject_pk);
-    let token = NucTokenBuilder::delegation([])
+    let subject_key = keypair();
+    let subject_signer = subject_key.signer(DidMethod::Key);
+    let subject = subject_key.to_did(DidMethod::Key);
+
+    // Self-signed delegation
+    let delegation = DelegationBuilder::new()
         .subject(subject.clone())
         .audience(subject)
         .command(["nil"])
-        .issued_by(subject_key);
+        .sign(&subject_signer)
+        .await
+        .expect("failed to build");
 
-    let envelope = Chainer::default().chain([token]).await;
     let asserter = Asserter { root_keys: Vec::new(), ..Default::default() };
-    asserter.assert_success(envelope);
+    asserter.assert_success(delegation.unvalidate());
 }
 
 #[tokio::test]
 async fn valid_root_token() {
-    let key = secret_key();
-    let root = delegation(&key).command(["nil"]).issued_by_root();
+    let key = keypair();
+    let root_signer = root_signer();
 
-    let envelope = Chainer::default().chain([root]).await;
-    Asserter::default().assert_success(envelope);
+    let delegation = delegation(&key).command(["nil"]).sign(&root_signer).await.expect("failed to build");
+
+    Asserter::default().assert_success(delegation.unvalidate());
 }

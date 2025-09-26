@@ -9,7 +9,7 @@
 //! The primary entry points for using this crate are:
 //!
 //! *   [`Keypair`]: For generating and managing cryptographic identities.
-//! *   [`NucTokenBuilder`]: For constructing delegation and invocation tokens.
+//! *   [`DelegationBuilder`] and [`InvocationBuilder`]: For constructing delegation and invocation tokens.
 //! *   [`NucTokenEnvelope`]: For decoding and handling token chains.
 //! *   [`NucValidator`]: For verifying the integrity and permissions of a token chain.
 //!
@@ -19,7 +19,7 @@
 //!
 //! ```rust
 //! use nillion_nucs::{
-//!     builder::NucTokenBuilder,
+//!     builder::DelegationBuilder,
 //!     did::Did,
 //!     keypair::Keypair,
 //!     signer::DidMethod,
@@ -30,11 +30,11 @@
 //!     let signer = keypair.signer(DidMethod::Key);
 //!     let audience_did = Keypair::generate().to_did(DidMethod::Key);
 //!
-//!     let token_string = NucTokenBuilder::delegation(vec![])
+//!     let token_string = DelegationBuilder::new()
 //!         .audience(audience_did.clone())
 //!         .subject(audience_did)
 //!         .command(["admin", "god-mode"])
-//!         .build(&signer)
+//!         .sign_and_serialize(&signer)
 //!         .await
 //!         .unwrap();
 //!
@@ -42,7 +42,8 @@
 //! }
 //! ```
 //!
-//! [`NucTokenBuilder`]: builder::NucTokenBuilder
+//! [`DelegationBuilder`]: builder::DelegationBuilder
+//! [`InvocationBuilder`]: builder::InvocationBuilder
 //! [`NucTokenEnvelope`]: envelope::NucTokenEnvelope
 //! [`NucValidator`]: validator::NucValidator
 

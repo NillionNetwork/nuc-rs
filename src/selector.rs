@@ -76,9 +76,9 @@ impl FromStr for Selector {
             return Err(SelectorParseError::MissingPrefix);
         };
         if s.is_empty() {
-            match &target {
-                SelectorTarget::Token => return Ok(Self { labels: Vec::new(), target }),
-                SelectorTarget::Context => return Err(SelectorParseError::ContextNeedsPath),
+            return match &target {
+                SelectorTarget::Token => Ok(Self { labels: Vec::new(), target }),
+                SelectorTarget::Context => Err(SelectorParseError::ContextNeedsPath),
             };
         }
 

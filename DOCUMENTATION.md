@@ -33,13 +33,13 @@ This example demonstrates the primary workflow:
 
 ```rust
 use nillion_nucs::{
-    builder::NucTokenBuilder,
+    builder::{DelegationBuilder, InvocationBuilder},
     did::Did,
     envelope::NucTokenEnvelope,
     keypair::Keypair,
     policy,
     signer::DidMethod,
-    validator::{ValidationConfig, NucValidator},
+    validator::{ValidationParameters, TokenTypeRequirements, NucValidator},
 };
 use serde_json::json;
 use std::collections::HashMap;
@@ -59,48 +59,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // === Step 2: Root delegates to User ===
     // The root authority grants the user the ability to perform any read
     // operation on the "users" collection.
-    let root_delegation_str = NucTokenBuilder::delegation(vec![
-        policy::op::eq(".command", json!("/db/read")),
-        policy::op::eq(".args.collection", json!("users")),
-    ])
+    let root_delegation_str = DelegationBuilder::new()
+        .policy(policy::op::eq(".command", json!("/db/read")))
+        .policy(policy::op::eq(".args.collection", json!("users")))
         .audience(user_keypair.to_did(DidMethod::Key))
         .subject(user_keypair.to_did(DidMethod::Key))
         .command(["db", "read"])
-        .build(&root_signer)
+        .sign_and_serialize(&root_signer)
         .await?;
 
     println!("Root Delegation Token:\n{}\n", root_delegation_str);
 
-    // The user decodes and validates the received token before using it.
-    let user_envelope = NucTokenEnvelope::decode(&root_delegation_str)?
-        .validate_signatures()?;
-
     // === Step 3: User delegates to Service ===
     // The user creates a more constrained delegation for a specific service.
     // This new token inherits the subject and command from the proof.
-    let user_to_service_delegation_str = NucTokenBuilder::extending(user_envelope)?
+    let user_to_service_delegation_str = DelegationBuilder::extending_from_serialized(&root_delegation_str)?
         .audience(service_keypair.to_did(DidMethod::Key))
         // The policy is reset, so we add a new, more specific one.
-        .body(policy::op::eq(".args.id", json!(123)).into())
-        .build(&user_signer)
+        .policy(policy::op::eq(".args.id", json!(123)))
+        .sign_and_serialize(&user_signer)
         .await?;
 
     println!("User->Service Delegation Token:\n{}\n", user_to_service_delegation_str);
 
-    // The service decodes and validates its token.
-    let service_envelope = NucTokenEnvelope::decode(&user_to_service_delegation_str)?
-        .validate_signatures()?;
-
     // === Step 4: Service creates an Invocation ===
     // The service invokes the capability to read user with id 123.
-    let invocation_str = NucTokenBuilder::invocation(
-        json!({ "collection": "users", "id": 123 }).as_object().unwrap().clone()
-    )
-        .proof(service_envelope)
+    let invocation_str = InvocationBuilder::extending_from_serialized(&user_to_service_delegation_str)?
+        .arguments(json!({ "collection": "users", "id": 123 }))
         .audience(root_keypair.to_did(DidMethod::Key)) // The final receiver is the root resource server
-        .subject(user_keypair.to_did(DidMethod::Key)) // Subject is inherited
-        .command(["db", "read"]) // Command is inherited
-        .build(&service_signer)
+        .sign_and_serialize(&service_signer)
         .await?;
 
     println!("Final Invocation Token:\n{}\n", invocation_str);
@@ -110,20 +97,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let final_envelope = NucTokenEnvelope::decode(&invocation_str)?
         .validate_signatures()?;
 
-    let validator = NucValidator::new(ValidationConfig {
-        // The validator must trust the root of the chain.
-        root_issuers: vec![root_keypair.to_did(DidMethod::Key)],
-        // The validator must know its own identity to check the audience.
-        token_requirements: Some(policy::op::eq(
-            ".aud",
-            json!(root_keypair.to_did(DidMethod::Key).to_string()),
-        )),
-        // The validator can provide external context for policy evaluation.
-        context: HashMap::new(),
+    let root_keys = vec![root_keypair.public_key()];
+    let mut validator = NucValidator::new(&root_keys);
+    let parameters = ValidationParameters {
+        token_requirements: TokenTypeRequirements::Invocation(root_keypair.to_did(DidMethod::Key)),
         ..Default::default()
-    });
+    };
+    let context = HashMap::new();
 
-    match validator.validate(&final_envelope) {
+    match validator.validate(final_envelope, parameters, &context) {
         Ok(_) => println!("✅ Final invocation chain is valid!"),
         Err(e) => println!("❌ Validation failed: {}", e),
     }
