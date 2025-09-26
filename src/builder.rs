@@ -212,7 +212,7 @@ mod tests {
     use super::*;
     use crate::signer::Eip712Signer;
     use crate::{
-        Signer, Signer,
+        Signer,
         did::Did,
         envelope::{NucTokenEnvelope, from_base64},
         policy,
