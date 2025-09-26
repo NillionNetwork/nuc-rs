@@ -1,3 +1,5 @@
+use ethers::types::Address;
+use ethers::utils::to_checksum;
 use hex::FromHexError;
 use multibase::{Base, encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
@@ -16,10 +18,12 @@ pub enum Did {
     Nil { public_key: [u8; 33] },
     /// The `key` method.
     Key { public_key: [u8; 33] },
+    /// The `ethr` method.
+    Ethr { address: [u8; 20] },
 }
 
 impl Did {
-    /// Construct a new Did for the `nil` method.
+    /// Construct a Did for the `nil` method.
     #[deprecated(
         since = "0.2.0",
         note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead."
@@ -29,18 +33,14 @@ impl Did {
         Self::Nil { public_key }
     }
 
-    /// Construct a new Did for the `key` method.
+    /// Construct a Did for the `key` method.
     pub fn key(public_key: [u8; 33]) -> Self {
         Self::Key { public_key }
     }
 
-    /// Returns the Did's public key.
-    #[allow(deprecated)]
-    pub fn public_key(&self) -> &[u8; 33] {
-        match self {
-            Self::Nil { public_key } => public_key,
-            Self::Key { public_key } => public_key,
-        }
+    /// Construct a Did for the `ethr` method.
+    pub fn ethr(address: [u8; 20]) -> Self {
+        Self::Ethr { address }
     }
 }
 
@@ -58,6 +58,10 @@ impl fmt::Display for Did {
                 prefixed_key.extend_from_slice(public_key);
                 let multibase_key = encode(Base::Base58Btc, prefixed_key);
                 write!(f, "did:key:{multibase_key}")
+            }
+            Did::Ethr { address } => {
+                let addr = Address::from(*address);
+                write!(f, "did:ethr:{}", to_checksum(&addr, None))
             }
         }
     }
@@ -83,6 +87,10 @@ impl FromStr for Did {
             let public_key: [u8; 33] =
                 input[SECP256K1_PREFIX.len()..].try_into().map_err(|_| ParseDidError::InvalidKeyLength)?;
             Ok(Self::Key { public_key })
+        } else if let Some(s) = s.strip_prefix("did:ethr:0x") {
+            let mut address = [0; 20];
+            hex::decode_to_slice(s, &mut address).map_err(ParseDidError::AddressChars)?;
+            Ok(Self::Ethr { address })
         } else {
             Err(ParseDidError::NoDid)
         }
@@ -117,6 +125,9 @@ pub enum ParseDidError {
     #[error("invalid public key hex characters: {0}")]
     PublicKeyChars(#[from] FromHexError),
 
+    #[error("invalid address hex characters: {0}")]
+    AddressChars(#[source] FromHexError),
+
     #[error("invalid multibase encoding")]
     Multibase,
 
@@ -133,6 +144,7 @@ pub enum ParseDidError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hex_literal::hex;
     use rstest::rstest;
 
     #[rstest]
@@ -144,6 +156,10 @@ mod tests {
     #[case::key(
         "did:key:zQ3shPE7AAuxa47pSKSz68iK64dEy6mx1g27Gwjaw294Q1XcY",
         Did::key(*b"\x02\x1a\xfa\xca\xde\x02\xde\xca\xff\xba\xbe\x10\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15")
+    )]
+    #[case::ethr(
+        "did:ethr:0xF3beAC30C498D9E26865F34fCAa57dBB935b0D74",
+        Did::ethr(hex!("f3beac30c498d9e26865f34fcaa57dbb935b0d74"))
     )]
     fn did_parsing_and_display(#[case] did_string: &str, #[case] expected_did: Did) {
         // Test parsing
@@ -162,6 +178,7 @@ mod tests {
     #[case::nil_invalid_public_key("did:bar:lol")]
     #[case::key_invalid_multibase("did:key:aaaaaaaaaaaaaaaaa")]
     #[case::key_unsupported_multibase("did:key:baaaaaaaaaaaaaaaaa")]
+    #[case::ethr_invalid_address("did:ethr:0xlol")]
     fn parse_invalid_did(#[case] input: &str) {
         Did::from_str(input).expect_err("parse succeeded");
     }

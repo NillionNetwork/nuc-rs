@@ -156,7 +156,19 @@ impl NucValidator {
             // The root issuer of this token is either the last proof issuer or the issuer of the
             // token itself.
             let root_issuer = &proofs.last().unwrap_or(&token).issuer;
-            if !root_keys.contains(root_issuer.public_key().as_slice()) {
+
+            // Check the root issuer's public key is in the set of allowed root keys
+            let root_key_found = match root_issuer {
+                #[allow(deprecated)]
+                Did::Nil { public_key } => root_keys.contains(public_key.as_slice()),
+                Did::Key { public_key } => root_keys.contains(public_key.as_slice()),
+                Did::Ethr { .. } => {
+                    // TODO - don't validate against root keys yet
+                    false
+                }
+            };
+
+            if !root_key_found {
                 return Err(ValidationError::Validation(ValidationKind::RootKeySignatureMissing));
             }
         }
@@ -434,6 +446,7 @@ mod tests {
         did::Did,
         envelope::from_base64,
         policy::{self},
+        signer::{DidMethod, Secp256k1Signer},
     };
     use k256::SecretKey;
     use rstest::rstest;
@@ -459,7 +472,7 @@ mod tests {
     }
 
     impl Chainer {
-        fn chain<const N: usize>(&self, mut builders: [Builder; N]) -> NucTokenEnvelope {
+        async fn chain<const N: usize>(&self, mut builders: [Builder; N]) -> NucTokenEnvelope {
             if self.chain_issuer_audience {
                 // Chain the issuer -> audience in every token
                 for i in 0..builders.len().saturating_sub(1) {
@@ -473,13 +486,13 @@ mod tests {
 
             // Now chain the proof hashes
             let mut builders = builders.into_iter();
-            let token = builders.next().expect("no builders").build();
+            let token = builders.next().expect("no builders").build().await;
             let mut envelope = NucTokenEnvelope::decode(&token).unwrap();
             for mut builder in builders {
                 let next = envelope.validate_signatures().expect("signature validation failed");
                 builder.builder = builder.builder.proof(next);
 
-                let token = builder.build();
+                let token = builder.build().await;
                 envelope = NucTokenEnvelope::decode(&token).unwrap();
             }
             envelope
@@ -643,8 +656,9 @@ mod tests {
     }
 
     impl Builder {
-        fn build(self) -> String {
-            self.builder.build(&self.owner_key.into()).expect("failed to build")
+        async fn build(self) -> String {
+            let signer = Secp256k1Signer::new(self.owner_key.into(), DidMethod::Key);
+            self.builder.build(&signer).await.expect("failed to build")
         }
     }
 
@@ -663,17 +677,6 @@ mod tests {
         }
     }
 
-    trait DidExt: Sized {
-        fn from_secret_key(secret_key: &SecretKey) -> Self;
-    }
-
-    impl DidExt for Did {
-        fn from_secret_key(secret_key: &SecretKey) -> Self {
-            let public_key: [u8; 33] = secret_key.public_key().to_sec1_bytes().deref().try_into().unwrap();
-            Did::key(public_key)
-        }
-    }
-
     fn secret_key() -> SecretKey {
         SecretKey::random(&mut rand::thread_rng())
     }
@@ -681,14 +684,14 @@ mod tests {
     // Create a delegation with the most common fields already set so we don't need to deal
     // with them in every single test.
     fn delegation(subject: &SecretKey) -> NucTokenBuilder {
-        NucTokenBuilder::delegation([]).audience(Did::key([0xde; 33])).subject(Did::from_secret_key(subject))
+        let subject_pk: [u8; 33] = subject.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        NucTokenBuilder::delegation([]).audience(Did::key([0xde; 33])).subject(Did::key(subject_pk))
     }
 
     // Same as the above but for invocations
     fn invocation(subject: &SecretKey) -> NucTokenBuilder {
-        NucTokenBuilder::invocation(Default::default())
-            .audience(Did::key([0xde; 33]))
-            .subject(Did::from_secret_key(subject))
+        let subject_pk: [u8; 33] = subject.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        NucTokenBuilder::invocation(Default::default()).audience(Did::key([0xde; 33])).subject(Did::key(subject_pk))
     }
 
     #[rstest]
@@ -717,46 +720,45 @@ mod tests {
         assert_eq!(properties, expected);
     }
 
-    #[test]
-    fn unlinked_chain() {
+    #[tokio::test]
+    async fn unlinked_chain() {
         let key = secret_key();
         let base = delegation(&key).command(["nil"]);
         // Chain 2.
-        let envelope = Chainer::default().chain([base.clone().issued_by_root(), base.clone().issued_by(key)]).encode();
+        let envelope =
+            Chainer::default().chain([base.clone().issued_by_root(), base.clone().issued_by(key)]).await.encode();
 
         // Now chain an extra one that nobody refers to.
-        let last = base.clone().issued_by_root().build();
+        let last = base.clone().issued_by_root().build().await;
         let token = format!("{envelope}/{last}");
         let envelope = NucTokenEnvelope::decode(&token).expect("decode failed");
         Asserter::default().assert_failure(envelope, ValidationKind::UnchainedProofs);
     }
 
-    #[test]
-    fn chain_too_long() {
+    #[tokio::test]
+    async fn chain_too_long() {
         let key = secret_key();
         let base = delegation(&key).command(["nil"]);
         let last = base.clone();
-        let envelope = Chainer::default().chain([
-            base.clone().issued_by_root(),
-            base.clone().issued_by(key.clone()),
-            last.issued_by(key.clone()),
-        ]);
+        let envelope = Chainer::default()
+            .chain([base.clone().issued_by_root(), base.clone().issued_by(key.clone()), last.issued_by(key.clone())])
+            .await;
         let parameters = ValidationParameters { max_chain_length: 2, ..Default::default() };
         Asserter::new(parameters).assert_failure(envelope, ValidationKind::ChainTooLong);
     }
 
-    #[test]
-    fn command_not_attenuated() {
+    #[tokio::test]
+    async fn command_not_attenuated() {
         let key = secret_key();
         let base = delegation(&key);
         let root = base.clone().command(["nil"]).issued_by_root();
         let last = base.command(["bar"]).issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::CommandNotAttenuated);
     }
 
-    #[test]
-    fn different_subjects() {
+    #[tokio::test]
+    async fn different_subjects() {
         let key1 = secret_key();
         let mut key2_bytes = key1.to_bytes();
         key2_bytes[0] ^= 1;
@@ -764,28 +766,28 @@ mod tests {
 
         let root = delegation(&key1).command(["nil"]).issued_by_root();
         let last = delegation(&key2).command(["nil"]).issued_by(key2);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::DifferentSubjects);
     }
 
-    #[test]
-    fn issuer_audience_mismatch() {
+    #[tokio::test]
+    async fn issuer_audience_mismatch() {
         let key = secret_key();
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().audience(Did::key([0xaa; 33])).issued_by_root();
         let last = base.issued_by(key);
-        let envelope = Chainer { chain_issuer_audience: false }.chain([root, last]);
+        let envelope = Chainer { chain_issuer_audience: false }.chain([root, last]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::IssuerAudienceMismatch);
     }
 
-    #[test]
-    fn invalid_audience_invocation() {
+    #[tokio::test]
+    async fn invalid_audience_invocation() {
         let key = secret_key();
         let expected_did = Did::key([0xaa; 33]);
         let actual_did = Did::key([0xbb; 33]);
         let root = delegation(&key).command(["nil"]).issued_by_root();
         let last = invocation(&key).command(["nil"]).audience(actual_did).issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         let parameters = ValidationParameters {
             token_requirements: TokenTypeRequirements::Invocation(expected_did),
             ..Default::default()
@@ -793,11 +795,11 @@ mod tests {
         Asserter::new(parameters).assert_failure(envelope, ValidationKind::InvalidAudience);
     }
 
-    #[test]
-    fn invalid_signature() {
+    #[tokio::test]
+    async fn invalid_signature() {
         let key = secret_key();
         let root = delegation(&key).command(["nil"]).issued_by_root();
-        let token = Chainer::default().chain([root]).encode();
+        let token = Chainer::default().chain([root]).await.encode();
         let (base, signature) = token.rsplit_once(".").unwrap();
 
         // Change a byte in the signature
@@ -807,20 +809,19 @@ mod tests {
         let signature = to_base64(&signature);
         let token = format!("{base}.{signature}");
         let envelope = NucTokenEnvelope::decode(&token).expect("decode failed");
-        let mut asserter = Asserter::default();
         // Don't require a root key signature
-        asserter.root_keys = Vec::new();
+        let asserter = Asserter { root_keys: Vec::new(), ..Default::default() };
         asserter.assert_failure(envelope, ValidationKind::InvalidSignatures);
     }
 
-    #[test]
-    fn invalid_audience_delegation() {
+    #[tokio::test]
+    async fn invalid_audience_delegation() {
         let key = secret_key();
         let expected_did = Did::key([0xaa; 33]);
         let actual_did = Did::key([0xbb; 33]);
         let root = delegation(&key).command(["nil"]).issued_by_root();
         let last = delegation(&key).command(["nil"]).audience(actual_did).issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         let parameters = ValidationParameters {
             token_requirements: TokenTypeRequirements::Delegation(expected_did),
             ..Default::default()
@@ -828,23 +829,24 @@ mod tests {
         Asserter::new(parameters).assert_failure(envelope, ValidationKind::InvalidAudience);
     }
 
-    #[test]
-    fn missing_proof() {
+    #[tokio::test]
+    async fn missing_proof() {
         let key = secret_key();
         let base = delegation(&key).command(["nil"]);
-        let token = Chainer::default().chain([base.clone().issued_by_root(), base.clone().issued_by(key)]).encode();
+        let token =
+            Chainer::default().chain([base.clone().issued_by_root(), base.clone().issued_by(key)]).await.encode();
         // Keep the token without its proof
         let token = token.split_once("/").unwrap().0;
         let envelope = NucTokenEnvelope::decode(token).expect("invalid token");
         Asserter::default().assert_failure(envelope, ValidationKind::MissingProof);
     }
 
-    #[test]
-    fn need_delegation() {
+    #[tokio::test]
+    async fn need_delegation() {
         let key = secret_key();
         let root = delegation(&key).command(["nil"]).issued_by_root();
         let last = invocation(&key).command(["nil"]).issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         let parameters = ValidationParameters {
             token_requirements: TokenTypeRequirements::Delegation(Did::key([0xaa; 33])),
             ..Default::default()
@@ -852,13 +854,13 @@ mod tests {
         Asserter::new(parameters).assert_failure(envelope, ValidationKind::NeedDelegation);
     }
 
-    #[test]
-    fn need_invocation() {
+    #[tokio::test]
+    async fn need_invocation() {
         let key = secret_key();
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().issued_by_root();
         let last = base.issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         let parameters = ValidationParameters {
             token_requirements: TokenTypeRequirements::Invocation(Did::key([0xaa; 33])),
             ..Default::default()
@@ -866,8 +868,8 @@ mod tests {
         Asserter::new(parameters).assert_failure(envelope, ValidationKind::NeedInvocation);
     }
 
-    #[test]
-    fn not_before_backwards() {
+    #[tokio::test]
+    async fn not_before_backwards() {
         let now = DateTime::from_timestamp(0, 0).unwrap();
         let root_not_before = DateTime::from_timestamp(5, 0).unwrap();
         let last_not_before = DateTime::from_timestamp(3, 0).unwrap();
@@ -876,12 +878,12 @@ mod tests {
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().not_before(root_not_before).issued_by_root();
         let last = base.not_before(last_not_before).issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::NotBeforeBackwards);
     }
 
-    #[test]
-    fn proof_not_before_not_met() {
+    #[tokio::test]
+    async fn proof_not_before_not_met() {
         let now = DateTime::from_timestamp(0, 0).unwrap();
         let not_before = DateTime::from_timestamp(10, 0).unwrap();
 
@@ -889,12 +891,12 @@ mod tests {
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().not_before(not_before).issued_by_root();
         let last = base.issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::NotBeforeNotMet);
     }
 
-    #[test]
-    fn last_not_before_not_met() {
+    #[tokio::test]
+    async fn last_not_before_not_met() {
         let now = DateTime::from_timestamp(0, 0).unwrap();
         let not_before = DateTime::from_timestamp(10, 0).unwrap();
 
@@ -902,14 +904,15 @@ mod tests {
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().issued_by_root();
         let last = base.not_before(not_before).issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::NotBeforeNotMet);
     }
 
-    #[test]
-    fn root_policy_not_met() {
+    #[tokio::test]
+    async fn root_policy_not_met() {
         let key = secret_key();
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
             .subject(subject.clone())
             .command(["nil"])
@@ -920,14 +923,15 @@ mod tests {
             .command(["nil"])
             .issued_by(key);
 
-        let envelope = Chainer::default().chain([root, invocation]);
+        let envelope = Chainer::default().chain([root, invocation]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::PolicyNotMet);
     }
 
-    #[test]
-    fn last_policy_not_met() {
+    #[tokio::test]
+    async fn last_policy_not_met() {
         let subject_key = secret_key();
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([]).subject(subject.clone()).command(["nil"]).issued_by_root();
         let intermediate = NucTokenBuilder::delegation([policy::op::eq(".foo", json!(42))])
             .subject(subject.clone())
@@ -939,53 +943,57 @@ mod tests {
             .command(["nil"])
             .issued_by(secret_key());
 
-        let envelope = Chainer::default().chain([root, intermediate, invocation]);
+        let envelope = Chainer::default().chain([root, intermediate, invocation]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::PolicyNotMet);
     }
 
-    #[test]
-    fn policy_too_deep() {
+    #[tokio::test]
+    async fn policy_too_deep() {
         // Build a not(not(not...(op))) chain that's one too deep
         let mut policy = policy::op::eq(".foo", json!(42));
         for _ in 0..MAX_POLICY_DEPTH {
             policy = policy::op::not(policy);
         }
         let key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([policy]).subject(subject.clone()).command(["nil"]).issued_by_root();
         let tail = delegation(&key).command(["nil"]).issued_by(key);
 
-        let envelope = Chainer::default().chain([root, tail]);
+        let envelope = Chainer::default().chain([root, tail]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::PolicyTooDeep);
     }
 
-    #[test]
-    fn policy_array_too_wide() {
+    #[tokio::test]
+    async fn policy_array_too_wide() {
         let policy = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
         let key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation(policy).subject(subject.clone()).command(["nil"]).issued_by_root();
         let tail = delegation(&key).command(["nil"]).issued_by(key);
-        let envelope = Chainer::default().chain([root, tail]);
+        let envelope = Chainer::default().chain([root, tail]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::PolicyTooWide);
     }
 
-    #[test]
-    fn policy_too_wide() {
+    #[tokio::test]
+    async fn policy_too_wide() {
         let policy = vec![policy::op::eq(".foo", json!(42)); MAX_POLICY_WIDTH + 1];
         let policy = policy::op::and(policy);
         let key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::delegation([policy]).subject(subject.clone()).command(["nil"]).issued_by_root();
         let tail = delegation(&key).command(["nil"]).issued_by(key);
-        let envelope = Chainer::default().chain([root, tail]);
+        let envelope = Chainer::default().chain([root, tail]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::PolicyTooWide);
     }
 
-    #[test]
-    fn proofs_must_be_delegations() {
+    #[tokio::test]
+    async fn proofs_must_be_delegations() {
         let key = secret_key();
-        let subject = Did::from_secret_key(&key);
+        let subject_pk: [u8; 33] = key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let root = NucTokenBuilder::invocation(json!({"bar": 1337}).as_object().cloned().unwrap())
             .subject(subject.clone())
             .command(["nil"])
@@ -996,35 +1004,35 @@ mod tests {
             .command(["nil"])
             .issued_by(key);
 
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::ProofsMustBeDelegations);
     }
 
-    #[test]
-    fn root_key_signature_missing() {
+    #[tokio::test]
+    async fn root_key_signature_missing() {
         let key = secret_key();
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().issued_by(key.clone());
         let last = base.issued_by(key);
 
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::RootKeySignatureMissing);
     }
 
-    #[test]
-    fn subject_not_in_chain() {
+    #[tokio::test]
+    async fn subject_not_in_chain() {
         let subject_key = secret_key();
         let key = secret_key();
         let base = delegation(&subject_key).command(["nil"]);
         let root = base.clone().issued_by_root();
         let last = base.issued_by(key);
 
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().assert_failure(envelope, ValidationKind::SubjectNotInChain);
     }
 
-    #[test]
-    fn root_token_expired() {
+    #[tokio::test]
+    async fn root_token_expired() {
         let now = DateTime::from_timestamp(10, 0).unwrap();
         let expires_at = DateTime::from_timestamp(5, 0).unwrap();
 
@@ -1032,12 +1040,12 @@ mod tests {
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().expires_at(expires_at).issued_by_root();
         let last = base.issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::TokenExpired);
     }
 
-    #[test]
-    fn last_token_expired() {
+    #[tokio::test]
+    async fn last_token_expired() {
         let now = DateTime::from_timestamp(10, 0).unwrap();
         let expires_at = DateTime::from_timestamp(5, 0).unwrap();
 
@@ -1045,14 +1053,15 @@ mod tests {
         let base = delegation(&key).command(["nil"]);
         let root = base.clone().issued_by_root();
         let last = base.expires_at(expires_at).issued_by(key);
-        let envelope = Chainer::default().chain([root, last]);
+        let envelope = Chainer::default().chain([root, last]).await;
         Asserter::default().with_current_time(now).assert_failure(envelope, ValidationKind::TokenExpired);
     }
 
-    #[test]
-    fn valid_token() {
+    #[tokio::test]
+    async fn valid_token() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let rpc_did = Did::key([0xaa; 33]);
         let root = NucTokenBuilder::delegation([
             policy::op::eq(".args.foo", json!(42)),
@@ -1072,7 +1081,7 @@ mod tests {
             .command(["nil", "bar", "foo"])
             .issued_by(invocation_key.clone());
 
-        let envelope = Chainer::default().chain([root, intermediate, invocation]);
+        let envelope = Chainer::default().chain([root, intermediate, invocation]).await;
         let parameters = ValidationParameters {
             token_requirements: TokenTypeRequirements::Invocation(rpc_did),
             ..Default::default()
@@ -1080,17 +1089,20 @@ mod tests {
         let context = HashMap::from([("req", json!({"bar": 1337}))]);
         let ValidatedNucToken { token, proofs } =
             Asserter::new(parameters).with_context(context).assert_success(envelope);
-        assert_eq!(token.issuer, Did::from_secret_key(&invocation_key));
+        let invocation_issuer_pk: [u8; 33] = invocation_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        assert_eq!(token.issuer, Did::key(invocation_issuer_pk));
 
         // Ensure the order is right
         assert_eq!(proofs[0].issuer, subject);
-        assert_eq!(proofs[1].issuer, Did::from_secret_key(&ROOT_SECRET_KEYS[0]));
+        let root_issuer_pk: [u8; 33] = ROOT_SECRET_KEYS[0].public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        assert_eq!(proofs[1].issuer, Did::key(root_issuer_pk));
     }
 
-    #[test]
-    fn valid_revocation_token() {
+    #[tokio::test]
+    async fn valid_revocation_token() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let rpc_did = Did::key([0xaa; 33]);
         let root = NucTokenBuilder::delegation([policy::op::eq(".args.foo", json!(42))])
             .subject(subject.clone())
@@ -1102,7 +1114,7 @@ mod tests {
             .command(["nuc", "revoke"])
             .issued_by(subject_key);
 
-        let envelope = Chainer::default().chain([root, invocation]);
+        let envelope = Chainer::default().chain([root, invocation]).await;
         let parameters = ValidationParameters {
             token_requirements: TokenTypeRequirements::Invocation(rpc_did),
             ..Default::default()
@@ -1110,28 +1122,28 @@ mod tests {
         Asserter::new(parameters).assert_success(envelope);
     }
 
-    #[test]
-    fn valid_no_root_keys_needed() {
+    #[tokio::test]
+    async fn valid_no_root_keys_needed() {
         let subject_key = SecretKey::random(&mut rand::thread_rng());
-        let subject = Did::from_secret_key(&subject_key);
+        let subject_pk: [u8; 33] = subject_key.public_key().to_sec1_bytes().as_ref().try_into().unwrap();
+        let subject = Did::key(subject_pk);
         let token = NucTokenBuilder::delegation([])
             .subject(subject.clone())
             .audience(subject)
             .command(["nil"])
             .issued_by(subject_key);
 
-        let envelope = Chainer::default().chain([token]);
-        let mut asserter = Asserter::default();
-        asserter.root_keys = Vec::new();
+        let envelope = Chainer::default().chain([token]).await;
+        let asserter = Asserter { root_keys: Vec::new(), ..Default::default() };
         asserter.assert_success(envelope);
     }
 
-    #[test]
-    fn valid_root_token() {
+    #[tokio::test]
+    async fn valid_root_token() {
         let key = secret_key();
         let root = delegation(&key).command(["nil"]).issued_by_root();
 
-        let envelope = Chainer::default().chain([root]);
+        let envelope = Chainer::default().chain([root]).await;
         Asserter::default().assert_success(envelope);
     }
 }
