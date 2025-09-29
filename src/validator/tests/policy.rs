@@ -57,7 +57,7 @@ async fn intermediate_policy_not_met() {
 
     // Root delegation without policy
     let root = DelegationBuilder::new()
-        .subject(subject.clone())
+        .subject(subject)
         .audience(subject_key.to_did(DidMethod::Key))
         .command(["nil"])
         .sign(&root_signer)

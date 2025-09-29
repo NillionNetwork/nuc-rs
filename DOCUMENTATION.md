@@ -1,115 +1,57 @@
-# Usage Documentation
+# Service Documentation
 
-## Installation
+## Building
 
-Add `nillion-nucs` to your `Cargo.toml`:
+You can build the `nilauth` binary from source using Cargo:
 
-```toml
-[dependencies]
-nillion-nucs = "0.1.0"
+```bash
+cargo build --release
 ```
 
-## Core Concepts
+The resulting binary will be located at `target/release/nilauth`.
 
-A NUC (Nillion User Controlled) token is a type of capability-based authorisation token inspired by the UCAN specification. It grants specific permissions from a sender to a receiver. Three core claims define the actors in this relationship:
+## Configuration
 
-| Claim     | Role                    | Description                                                                                                                                                   |
-|:----------|:------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **`iss`** | **Issuer (Sender)**     | The principal who created and signed the token.                                                                                                               |
-| **`aud`** | **Audience (Receiver)** | The principal the token is addressed to. This is the only entity that can use (i.e., invoke or delegate) the token.                                           |
-| **`sub`** | **Subject**             | The principal the token is "about". It represents the identity whose authority is being granted. This value must stay the same throughout a delegation chain. |
+The service is configured using a YAML file (e.g., `config.yaml`) and/or environment variables. See `config.sample.yaml` for a complete example.
 
-In a simple, two-party delegation, the `aud` and
-`sub` are often the same. When the Audience creates a new, chained token, it becomes the `iss` of the new token.
+| Section           | Key                         | Environment Variable                                          | Description                                                     |
+|:------------------|:----------------------------|:--------------------------------------------------------------|:----------------------------------------------------------------|
+| **`server`**      | `bind_endpoint`             | `NILAUTH__SERVER__BIND_ENDPOINT`                              | The `ip:port` for the main API server to listen on.             |
+| **`private_key`** | `hex`                       | `NILAUTH__PRIVATE_KEY__HEX`                                   | The 32-byte secp256k1 private key in hex for the service.       |
+| **`metrics`**     | `bind_endpoint`             | `NILAUTH__METRICS__BIND_ENDPOINT`                             | The `ip:port` for the Prometheus metrics server.                |
+| **`payments`**    | `nilchain_url`              | `NILAUTH__PAYMENTS__NILCHAIN_URL`                             | The JSON-RPC URL of a Nillion Chain node.                       |
+|                   | `renewal_threshold_seconds` | `NILAUTH__PAYMENTS__SUBSCRIPTIONS__RENEWAL_THRESHOLD_SECONDS` | How close to expiration a subscription must be to be renewable. |
+|                   | `length_seconds`            | `NILAUTH__PAYMENTS__SUBSCRIPTIONS__LENGTH_SECONDS`            | The duration of a newly purchased subscription.                 |
+|                   | `dollar_cost`               | -                                                             | A map of blind modules (`nildb`, `nilai`) to their cost in USD. |
+|                   | `base_url`                  | `NILAUTH__PAYMENTS__TOKEN_PRICE__BASE_URL`                    | The base URL for the token price API (e.g., CoinGecko).         |
+| **`postgres`**    | `url`                       | `NILAUTH__POSTGRES__URL`                                      | The connection string for the PostgreSQL database.              |
 
-## Complete Usage Example
+To run the service with a config file:
 
-This example demonstrates the primary workflow:
-
-1. A `root` authority delegates a capability to a `user`.
-2. The `user` further delegates a more specific capability to a `service`.
-3. The `service` creates an invocation to execute the capability.
-4. The final token chain is validated.
-
-```rust
-use nillion_nucs::{
-    builder::{DelegationBuilder, InvocationBuilder},
-    did::Did,
-    envelope::NucTokenEnvelope,
-    keypair::Keypair,
-    policy,
-    signer::DidMethod,
-    validator::{ValidationParameters, TokenTypeRequirements, NucValidator},
-};
-use serde_json::json;
-use std::collections::HashMap;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // === Step 1: Create Keypairs for all actors ===
-    let root_keypair = Keypair::generate();
-    let user_keypair = Keypair::generate();
-    let service_keypair = Keypair::generate();
-
-    // Create signers from the keypairs
-    let root_signer = root_keypair.signer(DidMethod::Key);
-    let user_signer = user_keypair.signer(DidMethod::Key);
-    let service_signer = service_keypair.signer(DidMethod::Key);
-
-    // === Step 2: Root delegates to User ===
-    // The root authority grants the user the ability to perform any read
-    // operation on the "users" collection.
-    let root_delegation_str = DelegationBuilder::new()
-        .policy(policy::op::eq(".command", json!("/db/read")))
-        .policy(policy::op::eq(".args.collection", json!("users")))
-        .audience(user_keypair.to_did(DidMethod::Key))
-        .subject(user_keypair.to_did(DidMethod::Key))
-        .command(["db", "read"])
-        .sign_and_serialize(&root_signer)
-        .await?;
-
-    println!("Root Delegation Token:\n{}\n", root_delegation_str);
-
-    // === Step 3: User delegates to Service ===
-    // The user creates a more constrained delegation for a specific service.
-    // This new token inherits the subject and command from the proof.
-    let user_to_service_delegation_str = DelegationBuilder::extending_from_serialized(&root_delegation_str)?
-        .audience(service_keypair.to_did(DidMethod::Key))
-        // The policy is reset, so we add a new, more specific one.
-        .policy(policy::op::eq(".args.id", json!(123)))
-        .sign_and_serialize(&user_signer)
-        .await?;
-
-    println!("User->Service Delegation Token:\n{}\n", user_to_service_delegation_str);
-
-    // === Step 4: Service creates an Invocation ===
-    // The service invokes the capability to read user with id 123.
-    let invocation_str = InvocationBuilder::extending_from_serialized(&user_to_service_delegation_str)?
-        .arguments(json!({ "collection": "users", "id": 123 }))
-        .audience(root_keypair.to_did(DidMethod::Key)) // The final receiver is the root resource server
-        .sign_and_serialize(&service_signer)
-        .await?;
-
-    println!("Final Invocation Token:\n{}\n", invocation_str);
-
-    // === Step 5: Final Validation ===
-    // The resource server receives the invocation and validates the entire chain.
-    let final_envelope = NucTokenEnvelope::decode(&invocation_str)?
-        .validate_signatures()?;
-
-    let root_keys = vec![root_keypair.public_key()];
-    let mut validator = NucValidator::new(&root_keys);
-    let parameters = ValidationParameters {
-        token_requirements: TokenTypeRequirements::Invocation(root_keypair.to_did(DidMethod::Key)),
-        ..Default::default()
-    };
-    let context = HashMap::new();
-
-    match validator.validate(final_envelope, parameters, &context) {
-        Ok(_) => println!("✅ Final invocation chain is valid!"),
-        Err(e) => println!("❌ Validation failed: {}", e),
-    }
-
-    Ok(())
-}
+```bash
+./target/release/nilauth --config-file config.yaml
 ```
+
+## Running with Docker
+
+A `Dockerfile` and `docker-compose.yml` are provided for containerized deployment. To run the service and its dependencies (PostgreSQL, nilchaind devnet):
+
+```bash
+docker compose up
+```
+
+Once running, you can start the `nilauth` service locally, and it will connect to the containerized dependencies as defined in `config.sample.yaml`.
+
+## API Endpoints
+
+The service exposes a RESTful API for managing subscriptions and minting tokens. The complete OpenAPI specification is available at the `/openapi.json` endpoint of a running instance.
+
+Key endpoints include:
+
+- `GET /about`: Get information about the service instance.
+- `GET /api/v1/payments/cost`: Get the current cost of a subscription.
+- `POST /api/v1/payments/validate`: Validate an on-chain payment to grant a subscription.
+- `GET /api/v1/subscriptions/status`: Check the status of a subscription.
+- `POST /api/v1/nucs/create`: Mint a root NUC for an active subscription.
+- `POST /api/v1/revocations/revoke`: Revoke a previously issued NUC.
+- `POST /api/v1/revocations/lookup`: Check if a NUC in a chain has been revoked.

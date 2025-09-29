@@ -10,17 +10,11 @@ use crate::{
     },
 };
 use chrono::{DateTime, Utc};
-use k256::PublicKey;
 use serde::Serialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::{collections::HashMap, env, sync::LazyLock};
 
 pub(crate) static ROOT_KEYPAIR: LazyLock<Keypair> = LazyLock::new(Keypair::generate);
-
-pub(crate) static ROOT_PUBLIC_KEYS: LazyLock<Vec<PublicKey>> = LazyLock::new(|| {
-    let key = ROOT_KEYPAIR.public_key();
-    vec![PublicKey::from_sec1_bytes(&key).expect("valid public key")]
-});
 
 pub(crate) enum TimeConfig {
     System,
@@ -37,7 +31,7 @@ impl TimeProvider for MockTimeProvider {
 
 pub(crate) struct Asserter {
     pub parameters: ValidationParameters,
-    pub root_keys: Vec<PublicKey>,
+    pub root_keys: Vec<[u8; 33]>,
     pub context: HashMap<&'static str, serde_json::Value>,
     pub time_config: TimeConfig,
     pub log_assertions: bool,
@@ -47,7 +41,7 @@ impl Asserter {
     pub fn new(parameters: ValidationParameters) -> Self {
         Self {
             parameters,
-            root_keys: ROOT_PUBLIC_KEYS.clone(),
+            root_keys: vec![ROOT_KEYPAIR.public_key()],
             context: Default::default(),
             time_config: TimeConfig::System,
             log_assertions: env::var("NUC_VALIDATOR_LOG_ASSERTIONS") == Ok("1".to_string()),
@@ -70,7 +64,7 @@ impl Asserter {
             TimeConfig::System => Utc::now(),
             TimeConfig::Mock(time) => time,
         };
-        let root_keys = self.root_keys.iter().map(|k| hex::encode(k.to_sec1_bytes())).collect();
+        let root_keys = self.root_keys.iter().map(hex::encode).collect();
         let input =
             AssertionInput { token, current_time, root_keys, context: self.context, parameters: self.parameters };
         Assertion { input, expectation }
@@ -123,12 +117,10 @@ impl Assertion {
         let envelope = NucTokenEnvelope::decode(&input.token).expect("malformed token");
         Self::log_tokens(&envelope);
 
-        let root_keys: Vec<_> = input
-            .root_keys
-            .iter()
-            .map(|k| PublicKey::from_sec1_bytes(&hex::decode(k).expect("invalid hex")).expect("invalid root key"))
-            .collect();
-        let mut validator = NucValidator::new(&root_keys);
+        let root_keys: Vec<[u8; 33]> =
+            input.root_keys.iter().map(|k| hex::decode(k).unwrap().try_into().unwrap()).collect();
+        let mut validator = NucValidator::new(root_keys).expect("Validator creation failed");
+
         validator.time_provider = Box::new(MockTimeProvider(input.current_time));
         let result = validator.validate(envelope, input.parameters, &input.context);
         match (result, expectation) {
@@ -246,7 +238,7 @@ where
     let subject_did = subject_key.to_did(DidMethod::Key);
 
     // Build the root delegation with sensible defaults
-    let root_builder = DelegationBuilder::new().command(["nil"]).audience(subject_did.clone()).subject(subject_did);
+    let root_builder = DelegationBuilder::new().command(["nil"]).audience(subject_did).subject(subject_did);
 
     // Apply test-specific modifications to the delegation
     let root_builder = delegation_modifier(root_builder);

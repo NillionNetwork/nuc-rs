@@ -15,7 +15,7 @@ const REVOCATION_COMMAND: &[&str] = &["nuc", "revoke"];
 pub(super) fn validate_proofs(
     token: &NucToken,
     proofs: &[&NucToken],
-    root_keys: &HashSet<Box<[u8]>>,
+    root_keys: &HashSet<[u8; 33]>,
 ) -> Result<(), ValidationError> {
     if !root_keys.is_empty() {
         // The root issuer of this token is either the last proof issuer or the issuer of the

@@ -214,7 +214,7 @@ async fn proofs_must_be_delegations() {
     // Root is an invocation
     let root_invocation = InvocationBuilder::new()
         .arguments(json!({"bar": 1337}))
-        .subject(subject.clone())
+        .subject(subject)
         .audience(key.to_did(DidMethod::Key))
         .command(["nil"])
         .sign(&root_signer)
@@ -292,8 +292,8 @@ async fn valid_token() {
     // Root delegation with policies
     let root = DelegationBuilder::new()
         .policies(vec![policy::op::eq(".args.foo", json!(42)), policy::op::eq("$.req.bar", json!(1337))])
-        .subject(subject.clone())
-        .audience(subject.clone())
+        .subject(subject)
+        .audience(subject)
         .command(["nil"])
         .sign(&root_signer)
         .await
@@ -312,7 +312,7 @@ async fn valid_token() {
     // Invocation with arguments meeting all policies
     let invocation = InvocationBuilder::extending(intermediate)
         .arguments(json!({"foo": 42, "bar": 1337}))
-        .audience(rpc_did.clone())
+        .audience(rpc_did)
         .command(["nil", "bar", "foo"])
         .sign(&invocation_signer)
         .await
@@ -338,7 +338,7 @@ async fn valid_revocation_token() {
     let invocation = build_invocation_with_one_proof(
         |delegation| delegation.policy(policy::op::eq(".args.foo", json!(42))),
         |invocation| {
-            invocation.arguments(json!({ "foo": 42, "bar": 1337 })).audience(rpc_did.clone()).command(["nuc", "revoke"])
+            invocation.arguments(json!({ "foo": 42, "bar": 1337 })).audience(rpc_did).command(["nuc", "revoke"])
         },
     )
     .await;
@@ -356,7 +356,7 @@ async fn valid_no_root_keys_needed() {
 
     // Self-signed delegation
     let delegation = DelegationBuilder::new()
-        .subject(subject.clone())
+        .subject(subject)
         .audience(subject)
         .command(["nil"])
         .sign(&subject_signer)

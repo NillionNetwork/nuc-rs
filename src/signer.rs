@@ -157,8 +157,8 @@ mod eip712_tests {
         let sub_did = Did::ethr(address);
 
         let nuc_string = DelegationBuilder::new()
-            .audience(aud_did.clone())
-            .subject(sub_did.clone())
+            .audience(aud_did)
+            .subject(sub_did)
             .command(&[] as &[&str])
             .sign_and_serialize(&signer)
             .await

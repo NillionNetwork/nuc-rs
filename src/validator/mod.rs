@@ -12,13 +12,20 @@ use crate::{
     token::{NucToken, TokenBody},
 };
 use chrono::{DateTime, Utc};
-use k256::PublicKey;
 use std::{
     collections::{HashMap, HashSet},
     iter,
 };
 
 pub use error::{ValidationError, ValidationKind};
+
+/// An error during the creation of a Nuc validator.
+#[derive(Debug, thiserror::Error)]
+pub enum NucValidatorCreationError {
+    /// An invalid public key was provided.
+    #[error("invalid public key provided: {0}")]
+    InvalidPublicKey(#[from] k256::elliptic_curve::Error),
+}
 
 const MAX_CHAIN_LENGTH: usize = 5;
 const MAX_POLICY_WIDTH: usize = 10;
@@ -72,15 +79,31 @@ pub enum TokenTypeRequirements {
 
 /// A Nuc validator.
 pub struct NucValidator {
-    root_keys: HashSet<Box<[u8]>>,
+    root_keys: HashSet<[u8; 33]>,
     time_provider: Box<dyn TimeProvider>,
 }
 
 impl NucValidator {
     /// Construct a new Nuc validator.
-    pub fn new(root_keys: &[PublicKey]) -> Self {
-        let root_keys = root_keys.iter().map(|pk| pk.to_sec1_bytes()).collect();
-        Self { root_keys, time_provider: Box::new(SystemClockTimeProvider) }
+    ///
+    /// This establishes the root of trust for token validation.
+    ///
+    /// # Arguments
+    ///
+    /// * `root_keys` - An iterator of 33-byte compressed secp256k1 public keys. Any valid
+    ///   token chain must be rooted in a token signed by one of these keys.
+    pub fn new<I>(root_keys: I) -> Result<Self, NucValidatorCreationError>
+    where
+        I: IntoIterator<Item = [u8; 33]>,
+    {
+        use k256::PublicKey;
+
+        let mut parsed_keys = HashSet::new();
+        for key_bytes in root_keys {
+            PublicKey::from_sec1_bytes(&key_bytes)?;
+            parsed_keys.insert(key_bytes);
+        }
+        Ok(Self { root_keys: parsed_keys, time_provider: Box::new(SystemClockTimeProvider) })
     }
 
     /// Validate a Nuc.

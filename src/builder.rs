@@ -180,7 +180,7 @@ impl<B> NucBuilderBase<B> {
 
         // Build the token
         let token = NucToken {
-            issuer: signer.did().clone(),
+            issuer: *signer.did(),
             audience,
             subject,
             not_before,
@@ -247,7 +247,7 @@ impl DelegationBuilder {
         Ok(Self {
             body: vec![],
             audience: None,
-            subject: Some(token.subject.clone()),
+            subject: Some(token.subject),
             not_before: None,
             expires_at: None,
             command: Some(token.command.clone()),
@@ -562,7 +562,6 @@ pub(crate) fn to_base64_json<T: Serialize>(input: &T) -> Result<String, serde_js
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::signer::Eip712Signer;
     use crate::{
         did::Did,
@@ -595,7 +594,7 @@ mod tests {
         // Step 1 - Root grants authority to the `ethr` identity.
         let root_envelope = DelegationBuilder::new()
             .audience(Did::key([0xaa; 33]))
-            .subject(ethr_signer.did().clone())
+            .subject(*ethr_signer.did())
             .command(["nil", "db"])
             .sign(&root_signer)
             .await
@@ -604,8 +603,8 @@ mod tests {
         // Step 2: `ethr` identity delegates its authority to the `final` identity
         let ethr_envelope = DelegationBuilder::extending(root_envelope)
             .expect("extending from root failed")
-            .audience(Did::key([0xaa; 33])) // Same resource server
-            .subject(final_signer.did().clone()) // Delegate to final_signer
+            .audience(Did::key([0xaa; 33]))
+            .subject(*final_signer.did())
             .sign(&ethr_signer)
             .await
             .expect("building ethr delegation failed");
@@ -613,7 +612,7 @@ mod tests {
         // Step 3: Final actor invokes a command
         let final_invocation = InvocationBuilder::extending(ethr_envelope)
             .audience(Did::key([0xaa; 33]))
-            .subject(final_signer.did().clone())
+            .subject(*final_signer.did())
             .command(["nil", "db", "read"])
             .arguments(json!({}))
             .sign_and_serialize(&final_signer)
