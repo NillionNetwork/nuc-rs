@@ -8,11 +8,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 use std::{fmt, str::FromStr};
 
 /// A decentralized Id.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Did {
     /// The legacy `nil` method.
     #[deprecated(
-        since = "0.2.0",
+        since = "1.0.0",
         note = "The `did:nil` method is legacy and will be removed the next major version. Use `did:key` instead."
     )]
     Nil { public_key: [u8; 33] },
@@ -25,7 +25,7 @@ pub enum Did {
 impl Did {
     /// Construct a Did for the `nil` method.
     #[deprecated(
-        since = "0.2.0",
+        since = "1.0.0",
         note = "The `did:nil` method is legacy and will be removed the next major version. Use `did:key` instead."
     )]
     #[allow(deprecated)]
