@@ -5,7 +5,7 @@ use crate::{
     signer::{Signer, SigningError},
     token::{Command, JsonObject, NucToken, TokenBody},
 };
-use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
+use base64::{prelude::BASE64_URL_SAFE_NO_PAD, Engine};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::time::Duration;
@@ -288,7 +288,7 @@ impl DelegationBuilder {
     /// This is a convenience method for adding several policies at once.
     pub fn policies<I>(mut self, new_policies: I) -> Self
     where
-        I: IntoIterator<Item = Policy>,
+        I: IntoIterator<Item=Policy>,
     {
         self.body.extend(new_policies);
         self
@@ -562,6 +562,7 @@ pub(crate) fn to_base64_json<T: Serialize>(input: &T) -> Result<String, serde_js
 
 #[cfg(test)]
 mod tests {
+    use crate::builder::{DelegationBuilder, InvocationBuilder};
     use crate::signer::Eip712Signer;
     use crate::{
         did::Did,
