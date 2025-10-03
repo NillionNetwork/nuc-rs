@@ -432,9 +432,11 @@ pub mod eip712 {
         fn from(token: NucToken) -> Self {
             let (pol, args) = match token.body {
                 TokenBody::Delegation(policies) => {
-                    (serde_json::to_value(policies).unwrap(), Value::Object(Default::default()))
+                    (serde_json::to_value(policies).unwrap(), serde_json::from_str::<Value>("{}").unwrap())
                 }
-                TokenBody::Invocation(args) => (Value::Array(Default::default()), serde_json::to_value(args).unwrap()),
+                TokenBody::Invocation(args) => {
+                    (serde_json::from_str::<Value>("[]").unwrap(), serde_json::to_value(args).unwrap())
+                }
             };
 
             Self {
@@ -453,8 +455,8 @@ pub mod eip712 {
     }
 
     impl Eip712NucPayload {
-        /// Create typed data for EIP-712 signing
-        pub fn to_typed_data(&self, domain: EIP712Domain) -> Result<TypedData, String> {
+        /// Create the EIP-712 types for a NucPayload.
+        pub fn get_eip712_types() -> Types {
             let mut types = Types::new();
             types.insert(
                 "NucPayload".to_string(),
@@ -471,6 +473,12 @@ pub mod eip712 {
                     Eip712DomainType { name: "prf".into(), r#type: "string[]".into() },
                 ],
             );
+            types
+        }
+
+        /// Create typed data for EIP-712 signing
+        pub fn to_typed_data(&self, domain: EIP712Domain) -> Result<TypedData, String> {
+            let types = Self::get_eip712_types();
 
             let message: BTreeMap<String, Value> =
                 serde_json::to_value(self).and_then(serde_json::from_value).map_err(|e| e.to_string())?;
