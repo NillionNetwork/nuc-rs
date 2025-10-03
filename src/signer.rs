@@ -18,7 +18,7 @@ pub enum DidMethod {
     /// The legacy `did:nil` method.
     #[deprecated(
         since = "0.2.0",
-        note = "The `did:nil` method is legacy and will be removed in 0.3.0. Use `did:key` instead."
+        note = "The `did:nil` method is legacy and will be removed the next major version. Use `did:key` instead."
     )]
     Nil,
 }
@@ -29,13 +29,13 @@ pub trait Signer {
     /// The DID of this signer.
     fn did(&self) -> &Did;
 
-    /// Sign a token.
+    /// Create and sign a Nuc for the given token.
     ///
-    /// Returns the header and signature for the token.
+    /// Returns the Nuc header and the resulting signature.
     async fn sign_token(&self, token: &NucToken) -> Result<(NucHeader, Vec<u8>), SigningError>;
 }
 
-/// An error that can occur when signing a NUC token.
+/// An error that can occur when signing a Nuc token.
 #[derive(Debug, thiserror::Error)]
 pub enum SigningError {
     #[error("signing failed: {0}")]
@@ -52,7 +52,7 @@ pub struct Secp256k1Signer {
 impl Secp256k1Signer {
     /// Create a new `Secp256k1Signer`.
     #[allow(deprecated)]
-    pub fn new(key: SigningKey, method: DidMethod) -> Self {
+    pub(crate) fn new(key: SigningKey, method: DidMethod) -> Self {
         let public_key: [u8; 33] = key.verifying_key().to_sec1_bytes().deref().try_into().unwrap();
         let (did, header) = match method {
             DidMethod::Key => (
@@ -135,7 +135,8 @@ impl<S: EthersSigner + Send + Sync> Signer for Eip712Signer<S> {
 #[cfg(test)]
 mod eip712_tests {
     use super::*;
-    use crate::{builder::NucTokenBuilder, envelope::NucTokenEnvelope};
+    use crate::builder::DelegationBuilder;
+    use crate::envelope::NucTokenEnvelope;
     use ethers::signers::{LocalWallet, Signer as EthersSigner};
 
     #[tokio::test]
@@ -155,11 +156,11 @@ mod eip712_tests {
         let aud_did = Did::ethr(address);
         let sub_did = Did::ethr(address);
 
-        let nuc_string = NucTokenBuilder::delegation(vec![])
-            .audience(aud_did.clone())
-            .subject(sub_did.clone())
+        let nuc_string = DelegationBuilder::new()
+            .audience(aud_did)
+            .subject(sub_did)
             .command(&[] as &[&str])
-            .build(&signer)
+            .sign_and_serialize(&signer)
             .await
             .expect("failed to build nuc");
 

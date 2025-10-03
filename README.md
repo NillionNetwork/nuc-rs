@@ -1,25 +1,23 @@
 # nuc-rs
 
-A Rust crate to create and validate NUCs, the authentication mechanism used in [Nillion](https://nillion.com/)'s blind 
-modules.
+[![CI](https://github.com/NillionNetwork/nuc-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/NillionNetwork/nuc-rs/actions/workflows/ci.yaml)
+[![Crates.io](https://img.shields.io/crates/v/nillion-nucs.svg)](https://crates.io/crates/nillion-nucs)
 
-# Contributing
+A Rust crate for creating and validating NUCs (Nillion User-Controlled tokens), the authentication mechanism used in [Nillion](https://nillion.com/)'s blind modules.
 
-In order to contribute, install [Rust](https://www.rust-lang.org/) and ensure all tests and lints pass by running:
+## Getting Started
 
-```bash
-cargo test
-cargo clippy
-```
+If you're new to the library, the best place to start is the **[Usage Documentation](./DOCUMENTATION.md)**, which provides a complete, step-by-step guide to creating and validating token chains.
 
-## Test input generation
+## Getting Help
 
-In order to generate test inputs that can be used in other implementations of NUC libraries to ensure all 
-implementations consider the same tokens as valid/invalid, run tests like this:
+- [Create an Issue](https://github.com/NillionNetwork/nuc-rs/issues/new/choose)
+- [Join our Discord](https://discord.com/invite/nillionnetwork)
 
-```bash
-NUC_VALIDATOR_LOG_ASSERTIONS=1 cargo test -q 2>/tmp/assertions.txt
-```
+## Contributing
 
-This will create the file `/tmp/assertions.txt` containing all the test assertions.
+We welcome contributions to the project! Please see the **[Contributing Guide](./CONTRIBUTING.md)** for details on how to get started.
 
+## License
+
+This project is licensed under the [MIT License](./LICENSE).
