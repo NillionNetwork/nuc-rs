@@ -2,14 +2,14 @@ use crate::{
     did::Did,
     token::{Eip712NucPayload, NucToken, ProofHash},
 };
-use base64::{Engine, display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD};
-use ethers::types::Signature as EthersSignature;
-use ethers::types::transaction::eip712::EIP712Domain;
+use base64::{display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use ethers::types::transaction::eip712::{EIP712Domain, Eip712, TypedData, Types};
+use ethers::types::{Signature as EthersSignature, H256};
 use k256::ecdsa::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use signature::Verifier;
-use std::{iter, marker::PhantomData};
+use std::{collections::BTreeMap, iter, marker::PhantomData};
 
 const DEFAULT_MAX_RAW_TOKEN_SIZE: usize = 1024 * 10;
 
@@ -226,17 +226,31 @@ impl DecodedNucToken {
         match header.typ {
             // This is a did:ethr token.
             Some(NucType::NucEip712) => {
-                let domain: EIP712Domain = serde_json::from_value(header.met.ok_or(InvalidSignature::InvalidHeader)?)
-                    .map_err(|_| InvalidSignature::InvalidHeader)?;
-                let typed_data = Eip712NucPayload::from(self.token.clone())
-                    .eip712_encode_data(domain)
+                // The validation logic uses the domain and types from the token header itself
+                let metadata: Eip712HeaderMetadata =
+                    serde_json::from_value(header.meta.ok_or(InvalidSignature::InvalidHeader)?)
+                        .map_err(|_| InvalidSignature::InvalidHeader)?;
+
+                let Eip712HeaderMetadata { domain, primary_type, types } = metadata;
+
+                let payload = Eip712NucPayload::from(self.token.clone());
+                let message: BTreeMap<String, serde_json::Value> = serde_json::to_value(&payload)
+                    .and_then(serde_json::from_value)
                     .map_err(|_| InvalidSignature::Eip712Encoding)?;
+
+                let typed_data = TypedData { domain, types, primary_type, message };
+
+                let hash = typed_data.encode_eip712().map(H256::from).map_err(|_| InvalidSignature::Eip712Encoding)?;
+
                 let signature = EthersSignature::try_from(self.raw.signature.as_slice())
                     .map_err(|_| InvalidSignature::Signature)?;
-                let recovered_address = signature.recover(typed_data).map_err(|_| InvalidSignature::Eip712Recovery)?;
+
+                let recovered_address = signature.recover(hash).map_err(|_| InvalidSignature::Eip712Recovery)?;
+
                 let Did::Ethr { address } = self.token.issuer else {
                     return Err(InvalidSignature::DidMethodMismatch);
                 };
+
                 if recovered_address.as_bytes() != address {
                     return Err(InvalidSignature::SignerAddressMismatch);
                 }
@@ -310,6 +324,14 @@ pub enum InvalidSignature {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct Eip712HeaderMetadata {
+    pub domain: EIP712Domain,
+    pub primary_type: String,
+    pub types: Types,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct NucHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub typ: Option<NucType>,
@@ -317,7 +339,7 @@ pub struct NucHeader {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ver: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub met: Option<serde_json::Value>,
+    pub meta: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -466,5 +488,14 @@ mod tests {
         let token = " ".repeat(DEFAULT_MAX_RAW_TOKEN_SIZE + 1);
         let err = NucTokenEnvelope::decode(&token).expect_err("decode succeeded");
         assert!(matches!(err, NucEnvelopeParseError::NucTooLarge(_)));
+    }
+
+    #[test]
+    fn metamask_created_nuc() {
+        let token = "eyJ0eXAiOiJudWMrZWlwNzEyIiwiYWxnIjoiRVMyNTZLIiwidmVyIjoiMS4wLjAiLCJtZXRhIjp7ImRvbWFpbiI6eyJuYW1lIjoiTlVDIiwidmVyc2lvbiI6IjEiLCJjaGFpbklkIjoxfSwicHJpbWFyeVR5cGUiOiJOdWNQYXlsb2FkIiwidHlwZXMiOnsiTnVjUGF5bG9hZCI6W3sibmFtZSI6ImlzcyIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJhdWQiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoic3ViIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6ImNtZCIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJwb2wiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoiYXJncyIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJuYmYiLCJ0eXBlIjoidWludDI1NiJ9LHsibmFtZSI6ImV4cCIsInR5cGUiOiJ1aW50MjU2In0seyJuYW1lIjoibm9uY2UiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoicHJmIiwidHlwZSI6InN0cmluZ1tdIn1dfX19.eyJpc3MiOiJkaWQ6ZXRocjoweGRGYjc2RUQzNzg5ZkI5ZTRkNjc2YmU0YzA2MDgzOTVhNDczMzdDZDkiLCJhdWQiOiJkaWQ6a2V5OnpRM3Noa0FSTDVKQUVCYkxmOGNxUEtwazNzVUFmYUhzMkZhTXoyaWtKZ3VhNk1qR3ciLCJzdWIiOiJkaWQ6ZXRocjoweGRGYjc2RUQzNzg5ZkI5ZTRkNjc2YmU0YzA2MDgzOTVhNDczMzdDZDkiLCJjbWQiOiIvbmlsL2F1dGgvcGF5bWVudHMvdmFsaWRhdGUiLCJhcmdzIjp7fSwibm9uY2UiOiI2OTQ0ODQyYTY4ZTQxNWI5ZDliNWVjZDRlMjVlYmQwZSIsInByZiI6W119.8axgm1t_x0XubgltP8PsptKnXmUGctlc60gpSxw8N_N3Vr742tvtKb8iNlbhMvv-P7ShiBnpgvc6gmVASDyi0xw";
+        NucTokenEnvelope::decode(&token)
+            .expect("failed to decode")
+            .validate_signatures()
+            .expect("failed to validate signature");
     }
 }

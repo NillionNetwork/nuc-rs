@@ -404,10 +404,7 @@ pub use eip712::Eip712NucPayload;
 
 pub mod eip712 {
     use crate::token::{NucToken, TokenBody};
-    use ethers::types::{
-        H256,
-        transaction::eip712::{EIP712Domain, Eip712, Eip712DomainType, TypedData, Types},
-    };
+    use ethers::types::transaction::eip712::{EIP712Domain, Eip712DomainType, TypedData, Types};
     use serde::Serialize;
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -432,9 +429,11 @@ pub mod eip712 {
         fn from(token: NucToken) -> Self {
             let (pol, args) = match token.body {
                 TokenBody::Delegation(policies) => {
-                    (serde_json::to_value(policies).unwrap(), Value::Object(Default::default()))
+                    (serde_json::to_value(policies).unwrap(), serde_json::from_str::<Value>("{}").unwrap())
                 }
-                TokenBody::Invocation(args) => (Value::Array(Default::default()), serde_json::to_value(args).unwrap()),
+                TokenBody::Invocation(args) => {
+                    (serde_json::from_str::<Value>("[]").unwrap(), serde_json::to_value(args).unwrap())
+                }
             };
 
             Self {
@@ -453,8 +452,8 @@ pub mod eip712 {
     }
 
     impl Eip712NucPayload {
-        /// Create typed data for EIP-712 signing
-        pub fn to_typed_data(&self, domain: EIP712Domain) -> Result<TypedData, String> {
+        /// Create the EIP-712 types for a NucPayload.
+        pub fn get_eip712_types() -> Types {
             let mut types = Types::new();
             types.insert(
                 "NucPayload".to_string(),
@@ -471,17 +470,17 @@ pub mod eip712 {
                     Eip712DomainType { name: "prf".into(), r#type: "string[]".into() },
                 ],
             );
+            types
+        }
+
+        /// Create typed data for EIP-712 signing
+        pub fn to_typed_data(&self, domain: EIP712Domain) -> Result<TypedData, String> {
+            let types = Self::get_eip712_types();
 
             let message: BTreeMap<String, Value> =
                 serde_json::to_value(self).and_then(serde_json::from_value).map_err(|e| e.to_string())?;
 
             Ok(TypedData { domain, types, primary_type: "NucPayload".to_string(), message })
-        }
-
-        /// Legacy method for envelope signature validation
-        pub fn eip712_encode_data(&self, domain: EIP712Domain) -> Result<H256, String> {
-            let typed_data = self.to_typed_data(domain)?;
-            typed_data.encode_eip712().map(H256::from).map_err(|e| e.to_string())
         }
     }
 
