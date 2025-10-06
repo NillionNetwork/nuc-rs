@@ -3,10 +3,10 @@ use crate::{
     did::Did,
     envelope::{Eip712HeaderMetadata, Eip712NucPayloadType, NucAlgorithm, NucHeader, NucType},
     token::{
+        NucToken, TokenBody,
         eip712::{
-            get_eip712_delegation_types, get_eip712_invocation_types, Eip712DelegationPayload, Eip712InvocationPayload,
-        }, NucToken,
-        TokenBody,
+            Eip712DelegationPayload, Eip712InvocationPayload, get_eip712_delegation_types, get_eip712_invocation_types,
+        },
     },
 };
 use async_trait::async_trait;

@@ -1,14 +1,14 @@
 use crate::{
     did::Did,
     token::{
-        eip712::{Eip712DelegationPayload, Eip712InvocationPayload}, NucToken,
-        ProofHash,
+        NucToken, ProofHash,
+        eip712::{Eip712DelegationPayload, Eip712InvocationPayload},
     },
 };
-use base64::{display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD};
 use core::fmt;
 use ethers::types::transaction::eip712::{EIP712Domain, Eip712, TypedData, Types};
-use ethers::types::{Signature as EthersSignature, H256};
+use ethers::types::{H256, Signature as EthersSignature};
 use k256::ecdsa::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
