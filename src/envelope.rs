@@ -1,8 +1,12 @@
 use crate::{
     did::Did,
-    token::{Eip712NucPayload, NucToken, ProofHash},
+    token::{
+        eip712::{Eip712DelegationPayload, Eip712InvocationPayload}, NucToken,
+        ProofHash,
+    },
 };
 use base64::{display::Base64Display, prelude::BASE64_URL_SAFE_NO_PAD, Engine};
+use core::fmt;
 use ethers::types::transaction::eip712::{EIP712Domain, Eip712, TypedData, Types};
 use ethers::types::{Signature as EthersSignature, H256};
 use k256::ecdsa::{Signature, VerifyingKey};
@@ -233,14 +237,27 @@ impl DecodedNucToken {
 
                 let Eip712HeaderMetadata { domain, primary_type, types } = metadata;
 
-                let payload = Eip712NucPayload::from(self.token.clone());
-                let message: BTreeMap<String, serde_json::Value> = serde_json::to_value(&payload)
-                    .and_then(serde_json::from_value)
-                    .map_err(|_| InvalidSignature::Eip712Encoding)?;
-
-                let typed_data = TypedData { domain, types, primary_type, message };
-
-                let hash = typed_data.encode_eip712().map(H256::from).map_err(|_| InvalidSignature::Eip712Encoding)?;
+                let hash = match primary_type {
+                    Eip712NucPayloadType::NucDelegationPayload => {
+                        let payload = Eip712DelegationPayload::from(self.token.clone());
+                        let message: BTreeMap<String, serde_json::Value> = serde_json::to_value(&payload)
+                            .and_then(serde_json::from_value)
+                            .map_err(|_| InvalidSignature::Eip712Encoding)?;
+                        TypedData { domain, types, primary_type: "NucDelegationPayload".to_string(), message }
+                            .encode_eip712()
+                            .map(H256::from)
+                    }
+                    Eip712NucPayloadType::NucInvocationPayload => {
+                        let payload = Eip712InvocationPayload::from(self.token.clone());
+                        let message: BTreeMap<String, serde_json::Value> = serde_json::to_value(&payload)
+                            .and_then(serde_json::from_value)
+                            .map_err(|_| InvalidSignature::Eip712Encoding)?;
+                        TypedData { domain, types, primary_type: "NucInvocationPayload".to_string(), message }
+                            .encode_eip712()
+                            .map(H256::from)
+                    }
+                }
+                .map_err(|_| InvalidSignature::Eip712Encoding)?;
 
                 let signature = EthersSignature::try_from(self.raw.signature.as_slice())
                     .map_err(|_| InvalidSignature::Signature)?;
@@ -322,11 +339,27 @@ pub enum InvalidSignature {
     Signature,
 }
 
+/// The primary type for an Eip-712 Nuc payload signature.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub enum Eip712NucPayloadType {
+    NucDelegationPayload,
+    NucInvocationPayload,
+}
+
+impl fmt::Display for Eip712NucPayloadType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Eip712NucPayloadType::NucDelegationPayload => write!(f, "NucDelegationPayload"),
+            Eip712NucPayloadType::NucInvocationPayload => write!(f, "NucInvocationPayload"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Eip712HeaderMetadata {
     pub domain: EIP712Domain,
-    pub primary_type: String,
+    pub primary_type: Eip712NucPayloadType,
     pub types: Types,
 }
 
@@ -492,8 +525,8 @@ mod tests {
 
     #[test]
     fn metamask_created_nuc() {
-        let token = "eyJ0eXAiOiJudWMrZWlwNzEyIiwiYWxnIjoiRVMyNTZLIiwidmVyIjoiMS4wLjAiLCJtZXRhIjp7ImRvbWFpbiI6eyJuYW1lIjoiTlVDIiwidmVyc2lvbiI6IjEiLCJjaGFpbklkIjoxfSwicHJpbWFyeVR5cGUiOiJOdWNQYXlsb2FkIiwidHlwZXMiOnsiTnVjUGF5bG9hZCI6W3sibmFtZSI6ImlzcyIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJhdWQiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoic3ViIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6ImNtZCIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJwb2wiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoiYXJncyIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJuYmYiLCJ0eXBlIjoidWludDI1NiJ9LHsibmFtZSI6ImV4cCIsInR5cGUiOiJ1aW50MjU2In0seyJuYW1lIjoibm9uY2UiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoicHJmIiwidHlwZSI6InN0cmluZ1tdIn1dfX19.eyJpc3MiOiJkaWQ6ZXRocjoweGRGYjc2RUQzNzg5ZkI5ZTRkNjc2YmU0YzA2MDgzOTVhNDczMzdDZDkiLCJhdWQiOiJkaWQ6a2V5OnpRM3Noa0FSTDVKQUVCYkxmOGNxUEtwazNzVUFmYUhzMkZhTXoyaWtKZ3VhNk1qR3ciLCJzdWIiOiJkaWQ6ZXRocjoweGRGYjc2RUQzNzg5ZkI5ZTRkNjc2YmU0YzA2MDgzOTVhNDczMzdDZDkiLCJjbWQiOiIvbmlsL2F1dGgvcGF5bWVudHMvdmFsaWRhdGUiLCJhcmdzIjp7fSwibm9uY2UiOiI2OTQ0ODQyYTY4ZTQxNWI5ZDliNWVjZDRlMjVlYmQwZSIsInByZiI6W119.8axgm1t_x0XubgltP8PsptKnXmUGctlc60gpSxw8N_N3Vr742tvtKb8iNlbhMvv-P7ShiBnpgvc6gmVASDyi0xw";
-        NucTokenEnvelope::decode(&token)
+        let token = "eyJ0eXAiOiJudWMrZWlwNzEyIiwiYWxnIjoiRVMyNTZLIiwidmVyIjoiMS4wLjAiLCJtZXRhIjp7ImRvbWFpbiI6eyJuYW1lIjoiTlVDIiwidmVyc2lvbiI6IjEiLCJjaGFpbklkIjoxfSwicHJpbWFyeVR5cGUiOiJOdWNJbnZvY2F0aW9uUGF5bG9hZCIsInR5cGVzIjp7Ik51Y0ludm9jYXRpb25QYXlsb2FkIjpbeyJuYW1lIjoiaXNzIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6ImF1ZCIsInR5cGUiOiJzdHJpbmcifSx7Im5hbWUiOiJzdWIiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoiY21kIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6ImFyZ3MiLCJ0eXBlIjoic3RyaW5nIn0seyJuYW1lIjoibmJmIiwidHlwZSI6InVpbnQyNTYifSx7Im5hbWUiOiJleHAiLCJ0eXBlIjoidWludDI1NiJ9LHsibmFtZSI6Im5vbmNlIiwidHlwZSI6InN0cmluZyJ9LHsibmFtZSI6InByZiIsInR5cGUiOiJzdHJpbmdbXSJ9XX19fQ.eyJpc3MiOiJkaWQ6ZXRocjoweGRGYjc2RUQzNzg5ZkI5ZTRkNjc2YmU0YzA2MDgzOTVhNDczMzdDZDkiLCJhdWQiOiJkaWQ6a2V5OnpRM3Noa0FSTDVKQUVCYkxmOGNxUEtwazNzVUFmYUhzMkZhTXoyaWtKZ3VhNk1qR3ciLCJzdWIiOiJkaWQ6ZXRocjoweGRGYjc2RUQzNzg5ZkI5ZTRkNjc2YmU0YzA2MDgzOTVhNDczMzdDZDkiLCJjbWQiOiIvbmlsL2F1dGgvcGF5bWVudHMvdmFsaWRhdGUiLCJhcmdzIjp7fSwibm9uY2UiOiIwN2U1MTNiMzI0ODY4NWJhODQ4YmJlZDIxMTY3ZjVkMyIsInByZiI6W119.kvMXcYmv64DTzufC1OyLkb8XIwmfbM_Bwk_RJD-z6RVplV7-zOrOzWfl1f9BR6_TmCBtMErYqn1Bpkty5j5yQBs";
+        NucTokenEnvelope::decode(token)
             .expect("failed to decode")
             .validate_signatures()
             .expect("failed to validate signature");

@@ -400,23 +400,33 @@ mod tests {
     }
 }
 
-pub use eip712::Eip712NucPayload;
-
 pub mod eip712 {
     use crate::token::{NucToken, TokenBody};
-    use ethers::types::transaction::eip712::{EIP712Domain, Eip712DomainType, TypedData, Types};
+    use ethers::types::transaction::eip712::Eip712DomainType;
+    use ethers::types::transaction::eip712::Types;
     use serde::Serialize;
     use serde_json::Value;
-    use std::collections::BTreeMap;
 
     #[derive(Clone, Debug, Serialize)]
-    pub struct Eip712NucPayload {
+    pub struct Eip712DelegationPayload {
         pub iss: String,
         pub aud: String,
         pub sub: String,
         pub cmd: String,
         #[serde(serialize_with = "to_string")]
         pub pol: Value,
+        pub nbf: u64,
+        pub exp: u64,
+        pub nonce: String,
+        pub prf: Vec<String>,
+    }
+
+    #[derive(Clone, Debug, Serialize)]
+    pub struct Eip712InvocationPayload {
+        pub iss: String,
+        pub aud: String,
+        pub sub: String,
+        pub cmd: String,
         #[serde(serialize_with = "to_string")]
         pub args: Value,
         pub nbf: u64,
@@ -425,15 +435,11 @@ pub mod eip712 {
         pub prf: Vec<String>,
     }
 
-    impl From<NucToken> for Eip712NucPayload {
+    impl From<NucToken> for Eip712DelegationPayload {
         fn from(token: NucToken) -> Self {
-            let (pol, args) = match token.body {
-                TokenBody::Delegation(policies) => {
-                    (serde_json::to_value(policies).unwrap(), serde_json::from_str::<Value>("{}").unwrap())
-                }
-                TokenBody::Invocation(args) => {
-                    (serde_json::from_str::<Value>("[]").unwrap(), serde_json::to_value(args).unwrap())
-                }
+            let pol = match token.body {
+                TokenBody::Delegation(policies) => serde_json::to_value(policies).unwrap(),
+                TokenBody::Invocation(_) => panic!("Cannot create delegation payload from invocation token"),
             };
 
             Self {
@@ -442,6 +448,26 @@ pub mod eip712 {
                 sub: token.subject.to_string(),
                 cmd: token.command.to_string(),
                 pol,
+                nbf: token.not_before.map(|dt| dt.timestamp() as u64).unwrap_or(0),
+                exp: token.expires_at.map(|dt| dt.timestamp() as u64).unwrap_or(0),
+                nonce: hex::encode(token.nonce),
+                prf: token.proofs.into_iter().map(|p| p.to_string()).collect(),
+            }
+        }
+    }
+
+    impl From<NucToken> for Eip712InvocationPayload {
+        fn from(token: NucToken) -> Self {
+            let args = match token.body {
+                TokenBody::Invocation(args) => serde_json::to_value(args).unwrap(),
+                TokenBody::Delegation(_) => panic!("Cannot create invocation payload from delegation token"),
+            };
+
+            Self {
+                iss: token.issuer.to_string(),
+                aud: token.audience.to_string(),
+                sub: token.subject.to_string(),
+                cmd: token.command.to_string(),
                 args,
                 nbf: token.not_before.map(|dt| dt.timestamp() as u64).unwrap_or(0),
                 exp: token.expires_at.map(|dt| dt.timestamp() as u64).unwrap_or(0),
@@ -451,37 +477,42 @@ pub mod eip712 {
         }
     }
 
-    impl Eip712NucPayload {
-        /// Create the EIP-712 types for a NucPayload.
-        pub fn get_eip712_types() -> Types {
-            let mut types = Types::new();
-            types.insert(
-                "NucPayload".to_string(),
-                vec![
-                    Eip712DomainType { name: "iss".into(), r#type: "string".into() },
-                    Eip712DomainType { name: "aud".into(), r#type: "string".into() },
-                    Eip712DomainType { name: "sub".into(), r#type: "string".into() },
-                    Eip712DomainType { name: "cmd".into(), r#type: "string".into() },
-                    Eip712DomainType { name: "pol".into(), r#type: "string".into() },
-                    Eip712DomainType { name: "args".into(), r#type: "string".into() },
-                    Eip712DomainType { name: "nbf".into(), r#type: "uint256".into() },
-                    Eip712DomainType { name: "exp".into(), r#type: "uint256".into() },
-                    Eip712DomainType { name: "nonce".into(), r#type: "string".into() },
-                    Eip712DomainType { name: "prf".into(), r#type: "string[]".into() },
-                ],
-            );
-            types
-        }
+    pub fn get_eip712_delegation_types() -> Types {
+        let mut types = Types::new();
+        types.insert(
+            "NucDelegationPayload".to_string(),
+            vec![
+                Eip712DomainType { name: "iss".into(), r#type: "string".into() },
+                Eip712DomainType { name: "aud".into(), r#type: "string".into() },
+                Eip712DomainType { name: "sub".into(), r#type: "string".into() },
+                Eip712DomainType { name: "cmd".into(), r#type: "string".into() },
+                Eip712DomainType { name: "pol".into(), r#type: "string".into() },
+                Eip712DomainType { name: "nbf".into(), r#type: "uint256".into() },
+                Eip712DomainType { name: "exp".into(), r#type: "uint256".into() },
+                Eip712DomainType { name: "nonce".into(), r#type: "string".into() },
+                Eip712DomainType { name: "prf".into(), r#type: "string[]".into() },
+            ],
+        );
+        types
+    }
 
-        /// Create typed data for EIP-712 signing
-        pub fn to_typed_data(&self, domain: EIP712Domain) -> Result<TypedData, String> {
-            let types = Self::get_eip712_types();
-
-            let message: BTreeMap<String, Value> =
-                serde_json::to_value(self).and_then(serde_json::from_value).map_err(|e| e.to_string())?;
-
-            Ok(TypedData { domain, types, primary_type: "NucPayload".to_string(), message })
-        }
+    pub fn get_eip712_invocation_types() -> Types {
+        let mut types = Types::new();
+        types.insert(
+            "NucInvocationPayload".to_string(),
+            vec![
+                Eip712DomainType { name: "iss".into(), r#type: "string".into() },
+                Eip712DomainType { name: "aud".into(), r#type: "string".into() },
+                Eip712DomainType { name: "sub".into(), r#type: "string".into() },
+                Eip712DomainType { name: "cmd".into(), r#type: "string".into() },
+                Eip712DomainType { name: "args".into(), r#type: "string".into() },
+                Eip712DomainType { name: "nbf".into(), r#type: "uint256".into() },
+                Eip712DomainType { name: "exp".into(), r#type: "uint256".into() },
+                Eip712DomainType { name: "nonce".into(), r#type: "string".into() },
+                Eip712DomainType { name: "prf".into(), r#type: "string[]".into() },
+            ],
+        );
+        types
     }
 
     fn to_string<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>

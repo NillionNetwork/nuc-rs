@@ -46,6 +46,7 @@
 //! [`InvocationBuilder`]: builder::InvocationBuilder
 //! [`NucTokenEnvelope`]: envelope::NucTokenEnvelope
 //! [`NucValidator`]: validator::NucValidator
+extern crate core;
 
 pub mod builder;
 pub mod did;
