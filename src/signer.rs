@@ -1,14 +1,20 @@
 use crate::{
     builder::to_base64_json,
     did::Did,
-    envelope::{NucAlgorithm, NucHeader, NucType},
-    token::{Eip712NucPayload, NucToken},
+    envelope::{Eip712HeaderMetadata, Eip712NucPayloadType, NucAlgorithm, NucHeader, NucType},
+    token::{
+        NucToken, TokenBody,
+        eip712::{
+            Eip712DelegationPayload, Eip712InvocationPayload, get_eip712_delegation_types, get_eip712_invocation_types,
+        },
+    },
 };
 use async_trait::async_trait;
 use ethers::signers::Signer as EthersSigner;
-use ethers::types::transaction::eip712::EIP712Domain;
+use ethers::types::transaction::eip712::{EIP712Domain, TypedData};
 use k256::ecdsa::{Signature, SigningKey};
 use signature::Signer as _;
+use std::collections::BTreeMap;
 use std::ops::Deref;
 
 /// A method for a DID that is derived from a secp256k1 key.
@@ -61,11 +67,11 @@ impl Secp256k1Signer {
                     typ: Some(NucType::Nuc),
                     alg: NucAlgorithm::ES256K,
                     ver: Some("1.0.0".to_string()),
-                    met: None,
+                    meta: None,
                 },
             ),
             DidMethod::Nil => {
-                (Did::nil(public_key), NucHeader { typ: None, alg: NucAlgorithm::ES256K, ver: None, met: None })
+                (Did::nil(public_key), NucHeader { typ: None, alg: NucAlgorithm::ES256K, ver: None, meta: None })
             }
         };
         Self { key, did, header }
@@ -94,7 +100,7 @@ impl Signer for Secp256k1Signer {
 /// A signer that uses an Eip-712 compatible wallet.
 pub struct Eip712Signer<S: EthersSigner> {
     did: Did,
-    header: NucHeader,
+    domain: EIP712Domain,
     signer: S,
 }
 
@@ -103,13 +109,7 @@ impl<S: EthersSigner> Eip712Signer<S> {
     pub fn new(domain: EIP712Domain, signer: S) -> Self {
         let address: [u8; 20] = signer.address().into();
         let did = Did::ethr(address);
-        let header = NucHeader {
-            typ: Some(NucType::NucEip712),
-            alg: NucAlgorithm::ES256K,
-            ver: Some("1.0.0".to_string()),
-            met: Some(serde_json::to_value(&domain).unwrap()),
-        };
-        Self { did, header, signer }
+        Self { did, domain, signer }
     }
 }
 
@@ -120,22 +120,73 @@ impl<S: EthersSigner + Send + Sync> Signer for Eip712Signer<S> {
     }
 
     async fn sign_token(&self, token: &NucToken) -> Result<(NucHeader, Vec<u8>), SigningError> {
-        let payload = Eip712NucPayload::from(token.clone());
-        let domain = serde_json::from_value(self.header.met.clone().unwrap())
-            .map_err(|e| SigningError::SigningFailed(e.to_string()))?;
-        let typed_data = payload.to_typed_data(domain).map_err(SigningError::SigningFailed)?;
+        let (metadata, typed_data) = match &token.body {
+            TokenBody::Delegation(_) => {
+                let payload = Eip712DelegationPayload::from(token.clone());
+                let types = get_eip712_delegation_types();
+                let primary_type = Eip712NucPayloadType::NucDelegationPayload;
+
+                let message: BTreeMap<String, serde_json::Value> = serde_json::to_value(&payload)
+                    .and_then(serde_json::from_value)
+                    .map_err(|e| SigningError::SigningFailed(e.to_string()))?;
+
+                let metadata = Eip712HeaderMetadata {
+                    domain: self.domain.clone(),
+                    primary_type: primary_type.clone(),
+                    types: types.clone(),
+                };
+
+                let typed_data = TypedData {
+                    domain: self.domain.clone(),
+                    types,
+                    primary_type: Eip712NucPayloadType::NucDelegationPayload.to_string(),
+                    message,
+                };
+                (metadata, typed_data)
+            }
+            TokenBody::Invocation(_) => {
+                let payload = Eip712InvocationPayload::from(token.clone());
+                let types = get_eip712_invocation_types();
+                let primary_type = Eip712NucPayloadType::NucInvocationPayload;
+
+                let message: BTreeMap<String, serde_json::Value> = serde_json::to_value(&payload)
+                    .and_then(serde_json::from_value)
+                    .map_err(|e| SigningError::SigningFailed(e.to_string()))?;
+
+                let metadata = Eip712HeaderMetadata {
+                    domain: self.domain.clone(),
+                    primary_type: primary_type.clone(),
+                    types: types.clone(),
+                };
+
+                let typed_data = TypedData {
+                    domain: self.domain.clone(),
+                    types,
+                    primary_type: Eip712NucPayloadType::NucInvocationPayload.to_string(),
+                    message,
+                };
+                (metadata, typed_data)
+            }
+        };
 
         let signature =
             self.signer.sign_typed_data(&typed_data).await.map_err(|e| SigningError::SigningFailed(e.to_string()))?;
 
-        Ok((self.header.clone(), signature.to_vec()))
+        let header = NucHeader {
+            typ: Some(NucType::NucEip712),
+            alg: NucAlgorithm::ES256K,
+            ver: Some("1.0.0".to_string()),
+            meta: Some(serde_json::to_value(&metadata).unwrap()),
+        };
+
+        Ok((header, signature.to_vec()))
     }
 }
 
 #[cfg(test)]
 mod eip712_tests {
     use super::*;
-    use crate::builder::DelegationBuilder;
+    use crate::builder::{DelegationBuilder, InvocationBuilder};
     use crate::envelope::NucTokenEnvelope;
     use ethers::signers::{LocalWallet, Signer as EthersSigner};
 
@@ -151,22 +202,39 @@ mod eip712_tests {
 
         let wallet = LocalWallet::new(&mut rand::thread_rng());
         let address: [u8; 20] = wallet.address().into();
-        let signer = Eip712Signer::new(domain, wallet);
+        let signer = Eip712Signer::new(domain.clone(), wallet);
 
         let aud_did = Did::ethr(address);
         let sub_did = Did::ethr(address);
 
-        let nuc_string = DelegationBuilder::new()
+        // --- Test Delegation ---
+        let delegation_nuc = DelegationBuilder::new()
             .audience(aud_did)
             .subject(sub_did)
             .command(&[] as &[&str])
             .sign_and_serialize(&signer)
             .await
-            .expect("failed to build nuc");
+            .expect("failed to build delegation nuc");
 
-        let envelope = NucTokenEnvelope::decode(&nuc_string).expect("failed to decode nuc");
+        let delegation_envelope = NucTokenEnvelope::decode(&delegation_nuc).expect("failed to decode delegation");
+        let header: NucHeader = serde_json::from_slice(&delegation_envelope.token().raw.header).unwrap();
+        let metadata: Eip712HeaderMetadata = serde_json::from_value(header.meta.unwrap()).unwrap();
+        assert_eq!(metadata.primary_type, Eip712NucPayloadType::NucDelegationPayload);
+        delegation_envelope.validate_signatures().expect("delegation signature validation failed");
 
-        // Validate the signature to complete the round trip test
-        envelope.validate_signatures().expect("signature validation failed");
+        // --- Test Invocation ---
+        let invocation_nuc = InvocationBuilder::new()
+            .audience(aud_did)
+            .subject(sub_did)
+            .command(&[] as &[&str])
+            .sign_and_serialize(&signer)
+            .await
+            .expect("failed to build invocation nuc");
+
+        let invocation_envelope = NucTokenEnvelope::decode(&invocation_nuc).expect("failed to decode invocation");
+        let header: NucHeader = serde_json::from_slice(&invocation_envelope.token().raw.header).unwrap();
+        let metadata: Eip712HeaderMetadata = serde_json::from_value(header.meta.unwrap()).unwrap();
+        assert_eq!(metadata.primary_type, Eip712NucPayloadType::NucInvocationPayload);
+        invocation_envelope.validate_signatures().expect("invocation signature validation failed");
     }
 }
