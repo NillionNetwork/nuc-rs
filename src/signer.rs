@@ -18,7 +18,7 @@ use signature::Signer as _;
 use std::collections::BTreeMap;
 use std::ops::Deref;
 
-/// A method for a DID that is derived from a secp256k1 key.
+/// A method for a Did that is derived from a `secp256k1` key.
 pub enum DidMethod {
     /// The modern `did:key` method.
     Key,
@@ -33,10 +33,10 @@ pub enum DidMethod {
 /// A Nuc token signer.
 #[async_trait]
 pub trait NucSigner: Send + Sync {
-    /// The DID of this signer.
+    /// Gets the Did of this signer.
     fn did(&self) -> &Did;
 
-    /// Create and sign a Nuc for the given token.
+    /// Creates and signs a Nuc for the given token.
     ///
     /// Returns the Nuc header and the resulting signature.
     async fn sign_token(&self, token: &NucToken) -> Result<(NucHeader, Vec<u8>), SigningError>;
@@ -45,6 +45,7 @@ pub trait NucSigner: Send + Sync {
 /// An error that can occur when signing a Nuc token.
 #[derive(Debug, thiserror::Error)]
 pub enum SigningError {
+    /// The signing operation failed.
     #[error("signing failed: {0}")]
     SigningFailed(String),
 }
@@ -52,13 +53,16 @@ pub enum SigningError {
 /// A signer that uses a local `secp256k1` key.
 #[derive(Clone)]
 pub struct Secp256k1Signer {
+    /// The signing key.
     key: SigningKey,
+    /// The Did derived from the key.
     did: Did,
+    /// The Nuc header template.
     header: NucHeader,
 }
 
 impl Secp256k1Signer {
-    /// Create a new `Secp256k1Signer`.
+    /// Creates a new `Secp256k1Signer`.
     #[allow(deprecated)]
     pub(crate) fn new(key: SigningKey, method: DidMethod) -> Self {
         let public_key: [u8; 33] = key.verifying_key().to_sec1_bytes().deref().try_into().unwrap();
@@ -122,13 +126,16 @@ impl NucSigner for Secp256k1Signer {
 
 /// A signer that uses an Eip-712 compatible wallet.
 pub struct Eip712Signer<S: EthersSigner> {
+    /// The Did derived from the wallet address.
     did: Did,
+    /// The EIP-712 domain.
     domain: EIP712Domain,
+    /// The underlying wallet signer.
     signer: S,
 }
 
 impl<S: EthersSigner> Eip712Signer<S> {
-    /// Create a new Eip-712 signer.
+    /// Creates a new Eip-712 signer.
     pub(crate) fn new(domain: EIP712Domain, signer: S) -> Self {
         let address: [u8; 20] = signer.address().into();
         let did = Did::ethr(address);

@@ -15,15 +15,23 @@ use std::time::Duration;
 /// This struct provides the base functionality for both delegation and invocation builders.
 #[derive(Clone, Debug)]
 pub struct NucBuilderBase<B> {
-    /// Serialised to pol for a Nuc delegation or args for a Nuc invocation
+    /// The builder's body, which becomes the token's policies or arguments.
     body: B,
+    /// The token's intended audience.
     audience: Option<Did>,
+    /// The token's subject.
     subject: Option<Did>,
+    /// The timestamp before which the token is not valid.
     not_before: Option<DateTime<Utc>>,
+    /// The token's expiration timestamp.
     expires_at: Option<DateTime<Utc>>,
+    /// The command this token authorises.
     command: Option<Command>,
+    /// Optional metadata for the token.
     meta: Option<JsonObject>,
+    /// A unique value to prevent token replay.
     nonce: Vec<u8>,
+    /// The chain of proof tokens.
     proofs: Vec<DecodedNucToken>,
 }
 

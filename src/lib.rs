@@ -57,5 +57,7 @@ pub mod signer;
 pub mod token;
 pub mod validator;
 
+/// Re-export of the `k256` crate for convenience.
 pub use k256;
+/// Core components for creating and signing Nuc tokens.
 pub use signer::{DidMethod, NucSigner, Secp256k1Signer, Signer};

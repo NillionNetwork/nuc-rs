@@ -28,7 +28,7 @@ pub struct Selector {
 }
 
 impl Selector {
-    /// Apply this selector on a value and context and return the selected value.
+    /// Applies this selector to a value and context, returning the selected value.
     pub fn apply<'a>(
         &self,
         value: &'a serde_json::Value,
@@ -114,15 +114,19 @@ impl fmt::Display for Selector {
 /// An error encountered when parsing a selector.
 #[derive(Debug, thiserror::Error)]
 pub enum SelectorParseError {
+    /// The selector contains an invalid character.
     #[error("invalid attribute character")]
     Alphabet,
 
+    /// The selector contains an empty attribute.
     #[error("empty attribute")]
     Empty,
 
+    /// The selector is missing the required prefix.
     #[error("selector must start with '.' or '$.'")]
     MissingPrefix,
 
+    /// A context selector requires a path.
     #[error("context selector needs path")]
     ContextNeedsPath,
 }
