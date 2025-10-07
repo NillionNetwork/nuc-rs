@@ -318,8 +318,8 @@ impl DelegationBuilder {
 
         let raw = RawNuc { header: header_bytes, payload: payload_bytes, signature };
 
-        let decoded_token =
-            DecodedNucToken::from_raw(raw).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
+        // Directly construct DecodedNucToken since we already have the deserialized token
+        let decoded_token = DecodedNucToken { raw, token };
 
         // Create the envelope
         let envelope = NucTokenEnvelope { token: decoded_token, proofs, _unused: std::marker::PhantomData };
@@ -337,25 +337,7 @@ impl DelegationBuilder {
     /// Returns an error if required fields are missing, signing fails,
     /// or serialization fails.
     pub async fn sign_and_serialize<S: NucSigner + ?Sized>(self, signer: &S) -> Result<String, NucTokenBuildError> {
-        // Prepare the token body
-        let token_body = TokenBody::Delegation(self.body.clone());
-
-        // Build and sign
-        let (token, header, signature, proofs) = self.build_and_sign_internal(signer, token_body).await?;
-
-        // Serialize to base64
-        let header_b64 = to_base64_json(&header).map_err(|e| NucTokenBuildError::EncodingHeader(e.to_string()))?;
-        let payload_b64 = to_base64_json(&token).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
-        let signature_b64 = to_base64(&signature);
-
-        // Build output string
-        let mut output = format!("{header_b64}.{payload_b64}.{signature_b64}");
-        for proof in proofs {
-            output.push('/');
-            output.push_str(&proof.to_nuc_str());
-        }
-
-        Ok(output)
+        self.sign(signer).await.map(|envelope| envelope.encode())
     }
 }
 
@@ -468,8 +450,8 @@ impl InvocationBuilder {
 
         let raw = RawNuc { header: header_bytes, payload: payload_bytes, signature };
 
-        let decoded_token =
-            DecodedNucToken::from_raw(raw).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
+        // Directly construct DecodedNucToken since we already have the deserialized token
+        let decoded_token = DecodedNucToken { raw, token };
 
         // Create the envelope
         let envelope = NucTokenEnvelope { token: decoded_token, proofs, _unused: std::marker::PhantomData };
@@ -487,31 +469,7 @@ impl InvocationBuilder {
     /// Returns an error if required fields are missing, the arguments are not
     /// a JSON object, signing fails, or serialization fails.
     pub async fn sign_and_serialize<S: NucSigner + ?Sized>(self, signer: &S) -> Result<String, NucTokenBuildError> {
-        // Validate and prepare the invocation body
-        let obj = self
-            .body
-            .as_object()
-            .ok_or_else(|| NucTokenBuildError::InvalidArguments("invocation arguments must be an object".to_string()))?
-            .clone();
-
-        let token_body = TokenBody::Invocation(obj);
-
-        // Build and sign
-        let (token, header, signature, proofs) = self.build_and_sign_internal(signer, token_body).await?;
-
-        // Serialize to base64
-        let header_b64 = to_base64_json(&header).map_err(|e| NucTokenBuildError::EncodingHeader(e.to_string()))?;
-        let payload_b64 = to_base64_json(&token).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
-        let signature_b64 = to_base64(&signature);
-
-        // Build output string
-        let mut output = format!("{header_b64}.{payload_b64}.{signature_b64}");
-        for proof in proofs {
-            output.push('/');
-            output.push_str(&proof.to_nuc_str());
-        }
-
-        Ok(output)
+        self.sign(signer).await.map(|envelope| envelope.encode())
     }
 }
 

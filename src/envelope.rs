@@ -35,19 +35,6 @@ impl NucTokenEnvelope<SignaturesUnvalidated> {
         NucEnvelopeDecoder::default().decode(s)
     }
 
-    /// Encode this envelope.
-    pub fn encode(&self) -> String {
-        let tokens = iter::once(&self.token).chain(&self.proofs);
-        let mut output = String::new();
-        for (index, token) in tokens.enumerate() {
-            if index > 0 {
-                output.push('/');
-            }
-            output.push_str(&token.to_nuc_str());
-        }
-        output
-    }
-
     /// Validate the signature of this token and all of its proofs.
     pub fn validate_signatures(self) -> Result<NucTokenEnvelope<SignaturesValidated>, InvalidSignature> {
         let tokens = iter::once(&self.token).chain(self.proofs.iter());
@@ -72,6 +59,19 @@ impl<T> NucTokenEnvelope<T> {
     /// Get the proofs in this envelope.
     pub fn proofs(&self) -> &[DecodedNucToken] {
         &self.proofs
+    }
+
+    /// Encode this envelope into a serialized string.
+    pub fn encode(&self) -> String {
+        let tokens = iter::once(&self.token).chain(&self.proofs);
+        let mut output = String::new();
+        for (index, token) in tokens.enumerate() {
+            if index > 0 {
+                output.push('/');
+            }
+            output.push_str(&token.to_nuc_str());
+        }
+        output
     }
 }
 
