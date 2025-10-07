@@ -7,7 +7,7 @@ pub use error::ParseDidError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error};
 use std::{fmt, str::FromStr};
 
-/// A decentralized Id.
+/// A Decentralised Identifier (Did).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Did {
     /// The legacy `nil` method.
@@ -23,7 +23,7 @@ pub enum Did {
 }
 
 impl Did {
-    /// Construct a Did for the `nil` method.
+    /// Constructs a Did for the `nil` method.
     #[deprecated(
         since = "1.0.0",
         note = "The `did:nil` method is legacy and will be removed the next major version. Use `did:key` instead."
@@ -33,12 +33,12 @@ impl Did {
         Self::Nil { public_key }
     }
 
-    /// Construct a Did for the `key` method.
+    /// Constructs a Did for the `key` method.
     pub fn key(public_key: [u8; 33]) -> Self {
         Self::Key { public_key }
     }
 
-    /// Construct a Did for the `ethr` method.
+    /// Constructs a Did for the `ethr` method.
     pub fn ethr(address: [u8; 20]) -> Self {
         Self::Ethr { address }
     }

@@ -3,7 +3,6 @@ use crate::{
     builder::{DelegationBuilder, InvocationBuilder},
     did::Did,
     policy,
-    signer::DidMethod,
     validator::{MAX_POLICY_DEPTH, MAX_POLICY_WIDTH, error::ValidationKind, policy::PolicyTreeProperties},
 };
 use rstest::rstest;
@@ -48,19 +47,18 @@ async fn root_policy_not_met() {
 
 #[tokio::test]
 async fn intermediate_policy_not_met() {
-    let subject_key = keypair();
-    let invocation_key = keypair();
     let root_signer = root_signer();
-    let subject_signer = subject_key.signer(DidMethod::Key);
-    let invocation_signer = invocation_key.signer(DidMethod::Key);
-    let subject = subject_key.to_did(DidMethod::Key);
+    let subject_signer = signer();
+    let subject_did = *subject_signer.did();
+    let invocation_signer = signer();
+    let invocation_did = *invocation_signer.did();
 
     // Root delegation without policy
     let root = DelegationBuilder::new()
-        .subject(subject)
-        .audience(subject_key.to_did(DidMethod::Key))
+        .subject(subject_did)
+        .audience(subject_did)
         .command(["nil"])
-        .sign(&root_signer)
+        .sign(&*root_signer)
         .await
         .expect("failed to build root");
 
@@ -68,9 +66,9 @@ async fn intermediate_policy_not_met() {
     let intermediate = DelegationBuilder::extending(root)
         .expect("failed to extend")
         .policy(policy::op::eq(".foo", json!(42)))
-        .audience(invocation_key.to_did(DidMethod::Key))
+        .audience(invocation_did)
         .command(["nil"])
-        .sign(&subject_signer)
+        .sign(&*subject_signer)
         .await
         .expect("failed to build intermediate");
 
@@ -79,7 +77,7 @@ async fn intermediate_policy_not_met() {
         .arguments(json!({"bar": 1337}))
         .audience(Did::key([0xaa; 33]))
         .command(["nil"])
-        .sign(&invocation_signer)
+        .sign(&*invocation_signer)
         .await
         .expect("failed to build invocation");
 

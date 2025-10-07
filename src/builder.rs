@@ -2,7 +2,7 @@ use crate::{
     did::Did,
     envelope::{DecodedNucToken, NucHeader, NucTokenEnvelope, RawNuc, SignaturesValidated},
     policy::Policy,
-    signer::{Signer, SigningError},
+    signer::{NucSigner, SigningError},
     token::{Command, JsonObject, NucToken, TokenBody},
 };
 use base64::{Engine, prelude::BASE64_URL_SAFE_NO_PAD};
@@ -15,15 +15,23 @@ use std::time::Duration;
 /// This struct provides the base functionality for both delegation and invocation builders.
 #[derive(Clone, Debug)]
 pub struct NucBuilderBase<B> {
-    /// Serialised to pol for a Nuc delegation or args for a Nuc invocation
+    /// The builder's body, which becomes the token's policies or arguments.
     body: B,
+    /// The token's intended audience.
     audience: Option<Did>,
+    /// The token's subject.
     subject: Option<Did>,
+    /// The timestamp before which the token is not valid.
     not_before: Option<DateTime<Utc>>,
+    /// The token's expiration timestamp.
     expires_at: Option<DateTime<Utc>>,
+    /// The command this token authorises.
     command: Option<Command>,
+    /// Optional metadata for the token.
     meta: Option<JsonObject>,
+    /// A unique value to prevent token replay.
     nonce: Vec<u8>,
+    /// The chain of proof tokens.
     proofs: Vec<DecodedNucToken>,
 }
 
@@ -37,7 +45,7 @@ pub struct NucBuilderBase<B> {
 /// ```no_run
 /// # use nillion_nucs::builder::DelegationBuilder;
 /// # use nillion_nucs::did::Did;
-/// # async fn example(signer: &impl nillion_nucs::signer::Signer) {
+/// # async fn example(signer: &impl nillion_nucs::signer::NucSigner) {
 /// let token = DelegationBuilder::new()
 ///     .audience(Did::key([0xaa; 33]))
 ///     .subject(Did::key([0xbb; 33]))
@@ -60,7 +68,7 @@ pub type DelegationBuilder = NucBuilderBase<Vec<Policy>>;
 /// # use nillion_nucs::builder::InvocationBuilder;
 /// # use nillion_nucs::did::Did;
 /// # use serde_json::json;
-/// # async fn example(signer: &impl nillion_nucs::signer::Signer) {
+/// # async fn example(signer: &impl nillion_nucs::signer::NucSigner) {
 /// let token = InvocationBuilder::new()
 ///     .audience(Did::key([0xaa; 33]))
 ///     .subject(Did::key([0xbb; 33]))
@@ -149,9 +157,9 @@ impl<B> NucBuilderBase<B> {
     }
 
     /// Private helper method for building and signing a token.
-    async fn build_and_sign_internal(
+    async fn build_and_sign_internal<S: NucSigner + ?Sized>(
         self,
-        signer: &impl Signer,
+        signer: &S,
         token_body: TokenBody,
     ) -> Result<(NucToken, NucHeader, Vec<u8>, Vec<DecodedNucToken>), NucTokenBuildError> {
         // Destructure self to get ownership of all fields
@@ -301,7 +309,10 @@ impl DelegationBuilder {
     /// # Errors
     ///
     /// Returns an error if required fields are missing or signing fails.
-    pub async fn sign(self, signer: &impl Signer) -> Result<NucTokenEnvelope<SignaturesValidated>, NucTokenBuildError> {
+    pub async fn sign<S: NucSigner + ?Sized>(
+        self,
+        signer: &S,
+    ) -> Result<NucTokenEnvelope<SignaturesValidated>, NucTokenBuildError> {
         // Prepare the token body
         let token_body = TokenBody::Delegation(self.body.clone());
 
@@ -315,8 +326,8 @@ impl DelegationBuilder {
 
         let raw = RawNuc { header: header_bytes, payload: payload_bytes, signature };
 
-        let decoded_token =
-            DecodedNucToken::from_raw(raw).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
+        // Directly construct DecodedNucToken since we already have the deserialized token
+        let decoded_token = DecodedNucToken { raw, token };
 
         // Create the envelope
         let envelope = NucTokenEnvelope { token: decoded_token, proofs, _unused: std::marker::PhantomData };
@@ -333,26 +344,8 @@ impl DelegationBuilder {
     ///
     /// Returns an error if required fields are missing, signing fails,
     /// or serialization fails.
-    pub async fn sign_and_serialize(self, signer: &impl Signer) -> Result<String, NucTokenBuildError> {
-        // Prepare the token body
-        let token_body = TokenBody::Delegation(self.body.clone());
-
-        // Build and sign
-        let (token, header, signature, proofs) = self.build_and_sign_internal(signer, token_body).await?;
-
-        // Serialize to base64
-        let header_b64 = to_base64_json(&header).map_err(|e| NucTokenBuildError::EncodingHeader(e.to_string()))?;
-        let payload_b64 = to_base64_json(&token).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
-        let signature_b64 = to_base64(&signature);
-
-        // Build output string
-        let mut output = format!("{header_b64}.{payload_b64}.{signature_b64}");
-        for proof in proofs {
-            output.push('/');
-            output.push_str(&proof.to_nuc_str());
-        }
-
-        Ok(output)
+    pub async fn sign_and_serialize<S: NucSigner + ?Sized>(self, signer: &S) -> Result<String, NucTokenBuildError> {
+        self.sign(signer).await.map(|envelope| envelope.encode())
     }
 }
 
@@ -442,7 +435,10 @@ impl InvocationBuilder {
     ///
     /// Returns an error if required fields are missing, the arguments are not
     /// a JSON object, or signing fails.
-    pub async fn sign(self, signer: &impl Signer) -> Result<NucTokenEnvelope<SignaturesValidated>, NucTokenBuildError> {
+    pub async fn sign<S: NucSigner + ?Sized>(
+        self,
+        signer: &S,
+    ) -> Result<NucTokenEnvelope<SignaturesValidated>, NucTokenBuildError> {
         // Validate and prepare the invocation body
         let obj = self
             .body
@@ -462,8 +458,8 @@ impl InvocationBuilder {
 
         let raw = RawNuc { header: header_bytes, payload: payload_bytes, signature };
 
-        let decoded_token =
-            DecodedNucToken::from_raw(raw).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
+        // Directly construct DecodedNucToken since we already have the deserialized token
+        let decoded_token = DecodedNucToken { raw, token };
 
         // Create the envelope
         let envelope = NucTokenEnvelope { token: decoded_token, proofs, _unused: std::marker::PhantomData };
@@ -480,32 +476,8 @@ impl InvocationBuilder {
     ///
     /// Returns an error if required fields are missing, the arguments are not
     /// a JSON object, signing fails, or serialization fails.
-    pub async fn sign_and_serialize(self, signer: &impl Signer) -> Result<String, NucTokenBuildError> {
-        // Validate and prepare the invocation body
-        let obj = self
-            .body
-            .as_object()
-            .ok_or_else(|| NucTokenBuildError::InvalidArguments("invocation arguments must be an object".to_string()))?
-            .clone();
-
-        let token_body = TokenBody::Invocation(obj);
-
-        // Build and sign
-        let (token, header, signature, proofs) = self.build_and_sign_internal(signer, token_body).await?;
-
-        // Serialize to base64
-        let header_b64 = to_base64_json(&header).map_err(|e| NucTokenBuildError::EncodingHeader(e.to_string()))?;
-        let payload_b64 = to_base64_json(&token).map_err(|e| NucTokenBuildError::EncodingToken(e.to_string()))?;
-        let signature_b64 = to_base64(&signature);
-
-        // Build output string
-        let mut output = format!("{header_b64}.{payload_b64}.{signature_b64}");
-        for proof in proofs {
-            output.push('/');
-            output.push_str(&proof.to_nuc_str());
-        }
-
-        Ok(output)
+    pub async fn sign_and_serialize<S: NucSigner + ?Sized>(self, signer: &S) -> Result<String, NucTokenBuildError> {
+        self.sign(signer).await.map(|envelope| envelope.encode())
     }
 }
 
@@ -563,11 +535,9 @@ pub(crate) fn to_base64_json<T: Serialize>(input: &T) -> Result<String, serde_js
 #[cfg(test)]
 mod tests {
     use crate::builder::{DelegationBuilder, InvocationBuilder};
-    use crate::signer::Eip712Signer;
     use crate::{
         did::Did,
         envelope::NucTokenEnvelope,
-        keypair::Keypair,
         signer::{DidMethod, Signer},
     };
     use ethers::prelude::LocalWallet;
@@ -580,24 +550,22 @@ mod tests {
     async fn heterogeneous_chain() {
         // Setup - Define the actors in the delegation chain
         // Root authority (did:nil)
-        let root_keypair = Keypair::generate();
-        let root_signer = root_keypair.signer(DidMethod::Nil);
+        let root_signer = Signer::generate(DidMethod::Nil);
 
         // Intermediate authority (did:ethr)
         let eth_wallet = LocalWallet::new(&mut rand::thread_rng());
         let domain = EIP712Domain { name: Some("Nuc".into()), version: Some("1.0.0".into()), ..Default::default() };
-        let ethr_signer = Eip712Signer::new(domain, eth_wallet.clone());
+        let ethr_signer = Signer::from_ethers_signer(domain, eth_wallet.clone());
 
         // Final actor (did:key)
-        let final_keypair = Keypair::generate();
-        let final_signer = final_keypair.signer(DidMethod::Key);
+        let final_signer = Signer::generate(DidMethod::Key);
 
         // Step 1 - Root grants authority to the `ethr` identity.
         let root_envelope = DelegationBuilder::new()
             .audience(Did::key([0xaa; 33]))
             .subject(*ethr_signer.did())
             .command(["nil", "db"])
-            .sign(&root_signer)
+            .sign(&*root_signer)
             .await
             .expect("building root nuc failed");
 
@@ -606,7 +574,7 @@ mod tests {
             .expect("extending from root failed")
             .audience(Did::key([0xaa; 33]))
             .subject(*final_signer.did())
-            .sign(&ethr_signer)
+            .sign(&*ethr_signer)
             .await
             .expect("building ethr delegation failed");
 
@@ -616,7 +584,7 @@ mod tests {
             .subject(*final_signer.did())
             .command(["nil", "db", "read"])
             .arguments(json!({}))
-            .sign_and_serialize(&final_signer)
+            .sign_and_serialize(&*final_signer)
             .await
             .expect("building final invocation failed");
 

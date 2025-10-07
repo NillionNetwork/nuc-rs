@@ -74,7 +74,7 @@ pub struct NucToken {
     pub proofs: Vec<ProofHash>,
 }
 
-/// The hash of a proof.
+/// The SHA-256 hash of a proof.
 #[derive(Clone, Copy, Debug, Eq, Hash, SerializeDisplay, DeserializeFromStr, PartialEq)]
 pub struct ProofHash(pub [u8; 32]);
 
@@ -95,12 +95,12 @@ impl FromStr for ProofHash {
     }
 }
 
-/// A command.
+/// A command representing a hierarchical path.
 #[derive(Clone, Debug, SerializeDisplay, DeserializeFromStr, PartialEq)]
 pub struct Command(pub Vec<String>);
 
 impl Command {
-    /// Check if this command is an attenuation of another one.
+    /// Checks if this command is an attenuation of another one.
     pub fn is_attenuation_of(&self, other: &Command) -> bool {
         if self.0.len() < other.0.len() {
             // We can't be an attenuation if we're shorter.
@@ -168,23 +168,27 @@ impl fmt::Display for Command {
     }
 }
 
-/// The body of a token
+/// The body of a token.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub enum TokenBody {
+    /// A delegation token with policies.
     #[serde(rename = "pol")]
     Delegation(Vec<Policy>),
 
+    /// An invocation token with arguments.
     #[serde(rename = "args")]
     Invocation(JsonObject),
 }
 
-/// An encountered error when parsing a command.
+/// An error encountered when parsing a command.
 #[derive(Debug, thiserror::Error)]
 pub enum MalformedCommandError {
+    /// The command is missing a leading slash.
     #[error("no leading slash")]
     LeadingSlash,
 
+    /// The command contains an empty segment.
     #[error("empty segment")]
     EmptySegment,
 }
@@ -400,6 +404,7 @@ mod tests {
     }
 }
 
+/// EIP-712 specific types and functions for Nuc tokens.
 pub mod eip712 {
     use crate::token::{NucToken, TokenBody};
     use ethers::types::transaction::eip712::Eip712DomainType;
@@ -407,31 +412,51 @@ pub mod eip712 {
     use serde::Serialize;
     use serde_json::Value;
 
+    /// An EIP-712 payload for a delegation token.
     #[derive(Clone, Debug, Serialize)]
     pub struct Eip712DelegationPayload {
+        /// The issuer Did.
         pub iss: String,
+        /// The audience Did.
         pub aud: String,
+        /// The subject Did.
         pub sub: String,
+        /// The command.
         pub cmd: String,
+        /// The policies.
         #[serde(serialize_with = "to_string")]
         pub pol: Value,
+        /// The not-before timestamp.
         pub nbf: u64,
+        /// The expiration timestamp.
         pub exp: u64,
+        /// The nonce.
         pub nonce: String,
+        /// The proof hashes.
         pub prf: Vec<String>,
     }
 
+    /// An EIP-712 payload for an invocation token.
     #[derive(Clone, Debug, Serialize)]
     pub struct Eip712InvocationPayload {
+        /// The issuer Did.
         pub iss: String,
+        /// The audience Did.
         pub aud: String,
+        /// The subject Did.
         pub sub: String,
+        /// The command.
         pub cmd: String,
+        /// The arguments.
         #[serde(serialize_with = "to_string")]
         pub args: Value,
+        /// The not-before timestamp.
         pub nbf: u64,
+        /// The expiration timestamp.
         pub exp: u64,
+        /// The nonce.
         pub nonce: String,
+        /// The proof hashes.
         pub prf: Vec<String>,
     }
 
@@ -477,6 +502,7 @@ pub mod eip712 {
         }
     }
 
+    /// Gets the EIP-712 type definitions for delegation payloads.
     pub fn get_eip712_delegation_types() -> Types {
         let mut types = Types::new();
         types.insert(
@@ -496,6 +522,7 @@ pub mod eip712 {
         types
     }
 
+    /// Gets the EIP-712 type definitions for invocation payloads.
     pub fn get_eip712_invocation_types() -> Types {
         let mut types = Types::new();
         types.insert(
@@ -515,6 +542,7 @@ pub mod eip712 {
         types
     }
 
+    /// Serializes a value as a JSON string for EIP-712 compatibility.
     fn to_string<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
     where
         T: Serialize,

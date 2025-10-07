@@ -66,13 +66,13 @@ impl Default for ValidationParameters {
 #[derive(Debug, Default)]
 #[cfg_attr(test, derive(serde::Serialize), serde(rename_all = "snake_case"))]
 pub enum TokenTypeRequirements {
-    /// Require an invocation for the given DID.
+    /// Requires an invocation for the given DID.
     Invocation(Did),
 
-    /// Require a delegation for the given DID.
+    /// Requires a delegation for the given DID.
     Delegation(Did),
 
-    /// Apply no token type requirements, meaning we're okay with any invocation and/or delegation.
+    /// Applies no token type requirements, meaning we're okay with any invocation and/or delegation.
     #[default]
     None,
 }
@@ -106,7 +106,28 @@ impl NucValidator {
         Ok(Self { root_keys: parsed_keys, time_provider: Box::new(SystemClockTimeProvider) })
     }
 
-    /// Validate a Nuc.
+    /// Validates a Nuc token envelope.
+    ///
+    /// This method performs a comprehensive validation of the token and its entire proof chain, including:
+    /// - Signature verification for all tokens in the chain.
+    /// - Temporal checks (expiration and not-before).
+    /// - Structural integrity of the delegation chain.
+    /// - Adherence to policy and command attenuations.
+    /// - Satisfaction of all policies for invocations.
+    ///
+    /// # Arguments
+    ///
+    /// * `envelope` - The Nuc token envelope to validate.
+    /// * `parameters` - The validation parameters to use.
+    /// * `context` - An external context map for policy evaluation.
+    ///
+    /// # Returns
+    ///
+    /// A [`ValidatedNucToken`] if validation is successful.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ValidationError`] if any validation check fails.
     pub fn validate(
         &self,
         envelope: NucTokenEnvelope,
@@ -181,12 +202,15 @@ fn validate_token(
 }
 
 /// A validated Nuc token along with its proofs.
+///
+/// This structure represents a token that has successfully passed all validation checks,
+/// including signature verification, temporal validation, and policy evaluation.
 #[derive(Debug)]
 pub struct ValidatedNucToken {
-    /// The token.
+    /// The validated token.
     pub token: NucToken,
 
-    /// The proofs for the token.
+    /// The validated proofs for the token.
     ///
     /// These are sorted in the way the chain was built, starting from `token`'s proof. That is:
     ///

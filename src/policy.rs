@@ -5,15 +5,17 @@ use serde::{
 };
 use std::{collections::HashMap, fmt};
 
-/// A Nuc policy.
+/// A Nuc policy, which is a rule that constrains a token's authority.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Policy {
+    /// A policy that applies a logical operator to a selected value.
     Operator(OperatorPolicy),
+    /// A policy that connects multiple other policies.
     Connector(ConnectorPolicy),
 }
 
 impl Policy {
-    /// Evaluate a policy on a JSON value.
+    /// Evaluates a policy against a Nuc invocation and external context.
     #[must_use]
     pub fn evaluate(&self, nuc_root: &serde_json::Value, context: &HashMap<&str, serde_json::Value>) -> bool {
         match self {
@@ -22,17 +24,17 @@ impl Policy {
         }
     }
 
-    /// Construct a policy that checks for equality.
+    /// Constructs a policy that checks for equality.
     pub fn equals(selector: Selector, value: serde_json::Value) -> Self {
         OperatorPolicy { selector, operator: Operator::Equals(value) }.into()
     }
 
-    /// Construct a policy that checks for inequality.
+    /// Constructs a policy that checks for inequality.
     pub fn not_equals(selector: Selector, value: serde_json::Value) -> Self {
         OperatorPolicy { selector, operator: Operator::NotEquals(value) }.into()
     }
 
-    /// Construct a policy that checks that a field contains one of the given values.
+    /// Constructs a policy that checks if a field contains one of the given values.
     pub fn any_of<I>(selector: Selector, values: I) -> Self
     where
         I: Into<Vec<serde_json::Value>>,
@@ -40,7 +42,7 @@ impl Policy {
         OperatorPolicy { selector, operator: Operator::AnyOf(values.into()) }.into()
     }
 
-    /// Construct a policy that checks that all given policies are valid.
+    /// Constructs a policy that requires all given policies to be valid.
     pub fn and<I>(policies: I) -> Self
     where
         I: Into<Vec<Policy>>,
@@ -48,7 +50,7 @@ impl Policy {
         ConnectorPolicy::And(policies.into()).into()
     }
 
-    /// Construct a policy that checks that at least one of the given policies are valid.
+    /// Constructs a policy that requires at least one of the given policies to be valid.
     pub fn or<I>(policies: I) -> Self
     where
         I: Into<Vec<Policy>>,
@@ -56,20 +58,20 @@ impl Policy {
         ConnectorPolicy::Or(policies.into()).into()
     }
 
-    /// Construct a policy that checks that the given policy is not valid.
+    /// Constructs a policy that inverts the result of another policy.
     #[allow(clippy::should_implement_trait)]
     pub fn not(policy: Policy) -> Self {
         ConnectorPolicy::Not(policy.into()).into()
     }
 }
 
-/// A policy that contains an operator.
+/// A policy that applies a logical operator to a value selected from a token or context.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OperatorPolicy {
-    /// The selector being used.
+    /// The selector for the value to check.
     pub selector: Selector,
 
-    /// The operator to be applied to the selected value.
+    /// The operator to apply to the selected value.
     pub operator: Operator,
 }
 
@@ -90,19 +92,25 @@ impl From<OperatorPolicy> for Policy {
     }
 }
 
-// An operator.
+/// A logical operator used in an [`OperatorPolicy`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Operator {
+    /// Checks for equality (`==`).
     Equals(serde_json::Value),
+    /// Checks for inequality (`!=`).
     NotEquals(serde_json::Value),
+    /// Checks if the selected value is one of the specified options (`anyOf`).
     AnyOf(Vec<serde_json::Value>),
 }
 
-/// A policy that contains a connector.
+/// A policy that connects multiple other policies together logically.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnectorPolicy {
+    /// A logical AND of multiple policies.
     And(Vec<Policy>),
+    /// A logical OR of multiple policies.
     Or(Vec<Policy>),
+    /// A logical NOT of a single policy.
     Not(Box<Policy>),
 }
 

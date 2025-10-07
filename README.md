@@ -1,7 +1,6 @@
 # nuc-rs
 
 [![CI](https://github.com/NillionNetwork/nuc-rs/actions/workflows/ci.yaml/badge.svg)](https://github.com/NillionNetwork/nuc-rs/actions/workflows/ci.yaml)
-[![Crates.io](https://img.shields.io/crates/v/nillion-nucs.svg)](https://crates.io/crates/nillion-nucs)
 
 A Rust crate for creating and validating NUCs (Nillion User-Controlled tokens), the authentication mechanism used in [Nillion](https://nillion.com/)'s blind modules.
 

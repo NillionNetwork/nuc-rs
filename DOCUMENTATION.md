@@ -1,57 +1,118 @@
-# Service Documentation
+# Usage Documentation
 
-## Building
+## Installation
 
-You can build the `nilauth` binary from source using Cargo:
-
-```bash
-cargo build --release
-```
-
-The resulting binary will be located at `target/release/nilauth`.
-
-## Configuration
-
-The service is configured using a YAML file (e.g., `config.yaml`) and/or environment variables. See `config.sample.yaml` for a complete example.
-
-| Section           | Key                         | Environment Variable                                          | Description                                                     |
-|:------------------|:----------------------------|:--------------------------------------------------------------|:----------------------------------------------------------------|
-| **`server`**      | `bind_endpoint`             | `NILAUTH__SERVER__BIND_ENDPOINT`                              | The `ip:port` for the main API server to listen on.             |
-| **`private_key`** | `hex`                       | `NILAUTH__PRIVATE_KEY__HEX`                                   | The 32-byte secp256k1 private key in hex for the service.       |
-| **`metrics`**     | `bind_endpoint`             | `NILAUTH__METRICS__BIND_ENDPOINT`                             | The `ip:port` for the Prometheus metrics server.                |
-| **`payments`**    | `nilchain_url`              | `NILAUTH__PAYMENTS__NILCHAIN_URL`                             | The JSON-RPC URL of a Nillion Chain node.                       |
-|                   | `renewal_threshold_seconds` | `NILAUTH__PAYMENTS__SUBSCRIPTIONS__RENEWAL_THRESHOLD_SECONDS` | How close to expiration a subscription must be to be renewable. |
-|                   | `length_seconds`            | `NILAUTH__PAYMENTS__SUBSCRIPTIONS__LENGTH_SECONDS`            | The duration of a newly purchased subscription.                 |
-|                   | `dollar_cost`               | -                                                             | A map of blind modules (`nildb`, `nilai`) to their cost in USD. |
-|                   | `base_url`                  | `NILAUTH__PAYMENTS__TOKEN_PRICE__BASE_URL`                    | The base URL for the token price API (e.g., CoinGecko).         |
-| **`postgres`**    | `url`                       | `NILAUTH__POSTGRES__URL`                                      | The connection string for the PostgreSQL database.              |
-
-To run the service with a config file:
+The library can be added to your project using Cargo:
 
 ```bash
-./target/release/nilauth --config-file config.yaml
+# Recommended:
+cargo add nillion-nucs --git https://github.com/NillionNetwork/nuc-rs --rev <LATEST_COMMIT_HASH>
+
+# Or, to use the main branch:
+cargo add nillion-nucs --git https://github.com/NillionNetwork/nuc-rs --branch main
 ```
 
-## Running with Docker
-
-A `Dockerfile` and `docker-compose.yml` are provided for containerized deployment. To run the service and its dependencies (PostgreSQL, nilchaind devnet):
-
-```bash
-docker compose up
+```rust
+use nillion_nucs::{
+    builder::DelegationBuilder,
+    did::Did,
+    envelope::NucTokenEnvelope,
+    signer::{DidMethod, Signer},
+    validator::NucValidator,
+};
 ```
 
-Once running, you can start the `nilauth` service locally, and it will connect to the containerized dependencies as defined in `config.sample.yaml`.
+## Core Concepts
 
-## API Endpoints
+A Nuc is a type of capability-based authorisation token inspired by the UCAN specification. It grants specific permissions from a sender to a receiver. Three core claims define the actors in this relationship:
 
-The service exposes a RESTful API for managing subscriptions and minting tokens. The complete OpenAPI specification is available at the `/openapi.json` endpoint of a running instance.
+| Claim     | Role                    | Description                                                                                                                                                   |
+|:----------|:------------------------|:--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **`iss`** | **Issuer (Sender)**     | The principal who created and signed the token.                                                                                                               |
+| **`aud`** | **Audience (Receiver)** | The principal the token is addressed to. This is the only entity that can use (i.e., invoke or delegate) the token.                                           |
+| **`sub`** | **Subject**             | The principal the token is "about". It represents the identity whose authority is being granted. This value must stay the same throughout a delegation chain. |
 
-Key endpoints include:
+In a simple, two-party delegation, the `aud` and `sub` are often the same. When the Audience creates a new, chained token, it becomes the `iss` of the new token.
 
-- `GET /about`: Get information about the service instance.
-- `GET /api/v1/payments/cost`: Get the current cost of a subscription.
-- `POST /api/v1/payments/validate`: Validate an on-chain payment to grant a subscription.
-- `GET /api/v1/subscriptions/status`: Check the status of a subscription.
-- `POST /api/v1/nucs/create`: Mint a root NUC for an active subscription.
-- `POST /api/v1/revocations/revoke`: Revoke a previously issued NUC.
-- `POST /api/v1/revocations/lookup`: Check if a NUC in a chain has been revoked.
+## Complete Usage Example
+
+This example demonstrates the primary workflow of creating delegation and invocation tokens:
+
+```rust
+use nillion_nucs::{
+    builder::{DelegationBuilder, InvocationBuilder},
+    did::Did,
+    envelope::NucTokenEnvelope,
+    policy,
+    signer::{DidMethod, NucSigner, Signer},
+    validator::{NucValidator, TokenTypeRequirements, ValidationParameters},
+};
+use serde_json::json;
+use std::{collections::HashMap, time::Duration};
+
+async fn example() {
+    // Step 1: Create Signers for different parties
+    // A root authority (e.g., for a server-side process with a private key)
+    let root_signer = Signer::from_private_key(
+        &[1; 32], // Use a real private key in production
+        DidMethod::Key,
+    );
+
+    // A user identity, newly generated for this session
+    let user_signer = Signer::generate(DidMethod::Key);
+
+    // A service that will receive the final invocation
+    let service_signer = Signer::generate(DidMethod::Key);
+
+    // Step 2: Get the DIDs for the user and service
+    let user_did = user_signer.did().clone();
+    let service_did = service_signer.did().clone();
+
+    // Step 3: Build a root delegation token
+    // This grants capabilities from the root to the user
+    let root_delegation_envelope = DelegationBuilder::new()
+        .audience(user_did.clone())
+        .subject(user_did.clone())
+        .command(["nil", "db", "collections", "read"])
+        .policies(vec![
+            policy::op::eq(".command", json!("/nil/db/collections")),
+            policy::op::ne(".args.collection", json!("secrets")),
+        ])
+        .expires_in(Duration::from_secs(3600)) // Expires in 1 hour
+        .sign(&*root_signer)
+        .await
+        .unwrap();
+
+    // Step 4: Build an invocation token from the delegation
+    // The user invokes their granted capability for the service
+    let invocation_envelope = InvocationBuilder::extending(root_delegation_envelope)
+        .unwrap()
+        .audience(service_did.clone())
+        .command(["nil", "db", "collections", "read"])
+        .arguments(json!({ "collection": "users" }))
+        .sign(&*user_signer)
+        .await
+        .unwrap();
+
+    // Step 5: Serialize for transmission
+    let token_string = invocation_envelope.unvalidate().encode();
+    println!("Token to send: {}", token_string);
+
+    // Step 6: (Optional) Decode and validate the token
+    // This would typically happen on the receiving service
+    let decoded_envelope = NucTokenEnvelope::decode(&token_string).unwrap();
+
+    let validator = NucValidator::new(vec![root_signer.public_key()]).unwrap();
+    let params = ValidationParameters {
+        token_requirements: TokenTypeRequirements::Invocation(service_did),
+        ..Default::default()
+    };
+    let context: HashMap<&str, serde_json::Value> =
+        HashMap::from([("environment", json!("production"))]);
+
+    match validator.validate(decoded_envelope, params, &context) {
+        Ok(_) => println!("Token is valid!"),
+        Err(e) => eprintln!("Validation failed: {}", e),
+    }
+}
+```

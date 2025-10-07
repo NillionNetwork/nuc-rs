@@ -28,27 +28,14 @@ pub struct NucTokenEnvelope<T = SignaturesUnvalidated> {
 }
 
 impl NucTokenEnvelope<SignaturesUnvalidated> {
-    /// Decode a Nuc token.
+    /// Decodes a Nuc token from a string.
     ///
-    /// This performs no integrity checks, and instead only ensures the token and its proofs are well formed.
+    /// This performs no integrity checks, and instead only ensures the token and its proofs are well-formed.
     pub fn decode(s: &str) -> Result<Self, NucEnvelopeParseError> {
         NucEnvelopeDecoder::default().decode(s)
     }
 
-    /// Encode this envelope.
-    pub fn encode(&self) -> String {
-        let tokens = iter::once(&self.token).chain(&self.proofs);
-        let mut output = String::new();
-        for (index, token) in tokens.enumerate() {
-            if index > 0 {
-                output.push('/');
-            }
-            output.push_str(&token.to_nuc_str());
-        }
-        output
-    }
-
-    /// Validate the signature of this token and all of its proofs.
+    /// Validates the signature of this token and all of its proofs.
     pub fn validate_signatures(self) -> Result<NucTokenEnvelope<SignaturesValidated>, InvalidSignature> {
         let tokens = iter::once(&self.token).chain(self.proofs.iter());
         for token in tokens {
@@ -59,19 +46,32 @@ impl NucTokenEnvelope<SignaturesUnvalidated> {
 }
 
 impl<T> NucTokenEnvelope<T> {
-    /// Split this envelope into its parts.
+    /// Splits this envelope into its parts.
     pub fn into_parts(self) -> (DecodedNucToken, Vec<DecodedNucToken>) {
         (self.token, self.proofs)
     }
 
-    /// Get the token in this envelope.
+    /// Gets the token in this envelope.
     pub fn token(&self) -> &DecodedNucToken {
         &self.token
     }
 
-    /// Get the proofs in this envelope.
+    /// Gets the proofs in this envelope.
     pub fn proofs(&self) -> &[DecodedNucToken] {
         &self.proofs
+    }
+
+    /// Encodes this envelope into a serialized string.
+    pub fn encode(&self) -> String {
+        let tokens = iter::once(&self.token).chain(&self.proofs);
+        let mut output = String::new();
+        for (index, token) in tokens.enumerate() {
+            if index > 0 {
+                output.push('/');
+            }
+            output.push_str(&token.to_nuc_str());
+        }
+        output
     }
 }
 
@@ -89,7 +89,7 @@ impl Default for NucEnvelopeDecoder {
 }
 
 impl NucEnvelopeDecoder {
-    /// Decode a Nuc.
+    /// Decodes a Nuc from a string.
     pub fn decode(&self, s: &str) -> Result<NucTokenEnvelope, NucEnvelopeParseError> {
         if s.len() > self.max_raw_token_size {
             return Err(NucEnvelopeParseError::NucTooLarge(self.max_raw_token_size));
@@ -117,7 +117,7 @@ pub struct SignaturesValidated;
 pub struct SignaturesUnvalidated;
 
 impl NucTokenEnvelope<SignaturesValidated> {
-    /// Convert a validated envelope to an unvalidated one.
+    /// Converts a validated envelope to an unvalidated one.
     pub fn unvalidate(self) -> NucTokenEnvelope<SignaturesUnvalidated> {
         NucTokenEnvelope { token: self.token, proofs: self.proofs, _unused: PhantomData }
     }
@@ -126,24 +126,30 @@ impl NucTokenEnvelope<SignaturesValidated> {
 /// An error when parsing a Nuc envelope.
 #[derive(Debug, thiserror::Error)]
 pub enum NucEnvelopeParseError {
+    /// The input string was empty.
     #[error("empty input")]
     NoInput,
 
-    #[error("NUC is larger than max allowed: {0} bytes")]
+    /// The Nuc string exceeds the maximum allowed size.
+    #[error("Nuc is larger than max allowed: {0} bytes")]
     NucTooLarge(usize),
 
-    #[error("invalid NUC: {0}")]
+    /// The Nuc string is malformed.
+    #[error("invalid Nuc: {0}")]
     Nuc(#[from] NucParseError),
 }
 
-/// A raw Nuc token.
+/// A raw, decoded Nuc token.
 ///
-/// This contains the raw parts that were serialized from a Nuc and is used to have access to the
-/// original unmodified
+/// This struct holds the original components of a Nuc token, allowing for signature
+/// verification without altering the original signed data.
 #[derive(Clone, Debug)]
 pub struct RawNuc {
+    /// The raw header bytes.
     pub(crate) header: Vec<u8>,
+    /// The raw payload bytes.
     pub(crate) payload: Vec<u8>,
+    /// The raw signature bytes.
     pub(crate) signature: Vec<u8>,
 }
 
@@ -173,23 +179,26 @@ impl RawNuc {
     }
 }
 
-/// An error when parsing a Nuc.
+/// An error when parsing a raw Nuc.
 #[derive(Debug, thiserror::Error)]
 pub enum NucParseError {
+    /// A required component (header, payload, or signature) is missing.
     #[error("no {0} component in nuc")]
     MissingComponent(&'static str),
 
+    /// A component's Base64URL encoding is invalid.
     #[error("invalid base64 found on {0}: {1}")]
     Base64(&'static str, base64::DecodeError),
 
+    /// A component's JSON content is invalid.
     #[error("invalid JSON on {0}: {1}")]
     Json(&'static str, serde_json::Error),
 }
 
 /// A decoded Nuc token.
 ///
-/// This is a wrapper over a Nuc token along with its raw pieces to be able to re-serialize it
-/// later on without altering its contents.
+/// This is a wrapper over a [`NucToken`] that includes its raw, serialized parts
+/// to enable signature validation and re-serialization.
 #[derive(Clone, Debug)]
 pub struct DecodedNucToken {
     pub(crate) raw: RawNuc,
@@ -213,14 +222,14 @@ impl DecodedNucToken {
         self.raw.to_nuc_str()
     }
 
-    /// Compute this token's hash.
+    /// Computes this token's SHA-256 hash.
     pub fn compute_hash(&self) -> ProofHash {
         let input = self.to_nuc_str();
         let hash = Sha256::digest(&input);
         ProofHash(hash.into())
     }
 
-    /// Validate the signature in this token.
+    /// Validates the signature in this token.
     ///
     /// This validates the signature for this single token only and does not
     /// validate any proofs in the chain.
@@ -303,12 +312,12 @@ impl DecodedNucToken {
         Ok(())
     }
 
-    /// Get the Nuc token.
+    /// Gets the Nuc token.
     pub fn token(&self) -> &NucToken {
         &self.token
     }
 
-    /// Consume and return the inner token.
+    /// Consumes the decoded token and returns the inner [`NucToken`].
     pub fn into_token(self) -> NucToken {
         self.token
     }
@@ -317,32 +326,41 @@ impl DecodedNucToken {
 /// An error during the verification of a token signature.
 #[derive(Debug, thiserror::Error)]
 pub enum InvalidSignature {
+    /// The Nuc header is malformed or missing required fields.
     #[error("invalid nuc header")]
     InvalidHeader,
 
+    /// The issuer's Did method does not match the Nuc's type.
     #[error("the did method does not match the nuc type")]
     DidMethodMismatch,
 
+    /// Failed to encode the payload for Eip-712 signing.
     #[error("Eip-712 encoding failed")]
     Eip712Encoding,
 
+    /// Failed to recover the signer's address from an Eip-712 signature.
     #[error("Eip-712 recovery failed")]
     Eip712Recovery,
 
+    /// The recovered signer's address does not match the token's issuer.
     #[error("signer address does not match issuer")]
     SignerAddressMismatch,
 
+    /// The issuer's public key is invalid.
     #[error("invalid issuer public key")]
     IssuerPublicKey,
 
+    /// The signature is invalid.
     #[error("invalid signature")]
     Signature,
 }
 
-/// The primary type for an Eip-712 Nuc payload signature.
+/// The primary type for an Eip-712 Nuc payload.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub enum Eip712NucPayloadType {
+    /// The payload is for a delegation token.
     NucDelegationPayload,
+    /// The payload is for an invocation token.
     NucInvocationPayload,
 }
 
@@ -355,36 +373,50 @@ impl fmt::Display for Eip712NucPayloadType {
     }
 }
 
+/// Eip-712 metadata included in the Nuc header.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Eip712HeaderMetadata {
+    /// The Eip-712 domain.
     pub domain: EIP712Domain,
+    /// The primary payload type.
     pub primary_type: Eip712NucPayloadType,
+    /// The type definitions for the Eip-712 payload.
     pub types: Types,
 }
 
+/// The header for a Nuc token.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NucHeader {
+    /// The Nuc token type.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub typ: Option<NucType>,
+    /// The signing algorithm.
     pub alg: NucAlgorithm,
+    /// The token specification version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ver: Option<String>,
+    /// Additional metadata, often used for Eip-712 signing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<serde_json::Value>,
 }
 
+/// The type of a Nuc token, indicating the signing scheme.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NucType {
+    /// A standard Nuc signed with a `secp256k1` key (`did:key`).
     #[serde(rename = "nuc")]
     Nuc,
+    /// A Nuc signed using the Eip-712 standard (`did:ethr`).
     #[serde(rename = "nuc+eip712")]
     NucEip712,
 }
 
+/// The signing algorithm used for the Nuc token.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum NucAlgorithm {
+    /// ECDSA with the `secp256k1` curve.
     ES256K,
 }
 
@@ -396,20 +428,19 @@ pub(crate) fn from_base64(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 mod tests {
     use super::*;
     use crate::builder::DelegationBuilder;
-    use crate::{builder::to_base64, did::Did, keypair::Keypair, policy, signer::DidMethod};
+    use crate::{Signer, builder::to_base64, did::Did, policy, signer::DidMethod};
     use rstest::rstest;
     use serde_json::json;
 
     #[tokio::test]
     async fn decoding() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let encoded = DelegationBuilder::new()
             .policy(policy::op::eq(".foo", json!(42)))
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
         let envelope = NucTokenEnvelope::decode(&encoded).expect("decode failed");
@@ -418,14 +449,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let token = DelegationBuilder::new()
             .policy(policy::op::eq(".foo", json!(42)))
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
         let (base, signature) = token.rsplit_once(".").unwrap();
@@ -458,13 +488,12 @@ mod tests {
 
     #[tokio::test]
     async fn nuc_serde() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let encoded = DelegationBuilder::new()
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
 
@@ -498,8 +527,7 @@ mod tests {
 
     #[tokio::test]
     async fn deep_nesting() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let mut policy = policy::op::eq(".foo", json!(42));
         for _ in 0..128 {
             policy = policy::op::not(policy);
@@ -509,7 +537,7 @@ mod tests {
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
         let err = NucTokenEnvelope::decode(&encoded).expect_err("decode succeeded");
