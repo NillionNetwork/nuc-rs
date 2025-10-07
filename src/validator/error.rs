@@ -60,7 +60,7 @@ impl fmt::Display for ValidationKind {
             PolicyTooDeep => "policy is too deep",
             PolicyTooWide => "policy is too wide",
             ProofsMustBeDelegations => "proofs must be delegations",
-            RootKeySignatureMissing => "root NUC is not signed by root keypair",
+            RootKeySignatureMissing => "root NUC is not signed by root",
             SubjectNotInChain => "subject not in chain",
             TokenExpired => "token is expired",
             TooManyProofs => "up to one `prf` in a token is allowed",

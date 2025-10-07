@@ -1,10 +1,10 @@
 use super::fixtures::*;
 use crate::{
+    NucSigner,
     builder::{DelegationBuilder, InvocationBuilder, NucTokenBuildError, to_base64},
     did::Did,
     envelope::{NucTokenEnvelope, from_base64},
     policy,
-    signer::DidMethod,
     validator::{TokenTypeRequirements, ValidatedNucToken, ValidationParameters, error::ValidationKind},
 };
 use serde_json::json;
@@ -12,15 +12,15 @@ use std::collections::HashMap;
 
 #[tokio::test]
 async fn unlinked_chain() {
-    let key = keypair();
     let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
+    let key_signer = signer();
+    let key_did = *key_signer.did();
 
     // Build the first delegation token
-    let first = delegation(&key)
+    let first = delegation(key_did)
         .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
+        .audience(key_did)
+        .sign(&*root_signer)
         .await
         .expect("failed to build first");
 
@@ -29,13 +29,13 @@ async fn unlinked_chain() {
         .expect("failed to extend")
         .audience(Did::key([0xde; 33]))
         .command(["nil"])
-        .sign(&key_signer)
+        .sign(&*key_signer)
         .await
         .expect("failed to build second");
 
     // Now add an unlinked token (not chained properly)
     let unlinked =
-        delegation(&key).command(["nil"]).sign_and_serialize(&root_signer).await.expect("failed to build unlinked");
+        delegation(key_did).command(["nil"]).sign_and_serialize(&*root_signer).await.expect("failed to build unlinked");
 
     // Manually construct an envelope with the unlinked proof
     let second_encoded = second.unvalidate().encode();
@@ -46,24 +46,24 @@ async fn unlinked_chain() {
 
 #[tokio::test]
 async fn chain_too_long() {
-    let key = keypair();
     let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
+    let key_signer = signer();
+    let key_did = *key_signer.did();
 
     // Build first token
-    let first = delegation(&key)
+    let first = delegation(key_did)
         .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
+        .audience(key_did)
+        .sign(&*root_signer)
         .await
         .expect("failed to build first");
 
     // Build second token extending first
     let second = DelegationBuilder::extending(first)
         .expect("failed to extend")
-        .audience(key.to_did(DidMethod::Key))
+        .audience(key_did)
         .command(["nil"])
-        .sign(&key_signer)
+        .sign(&*key_signer)
         .await
         .expect("failed to build second");
 
@@ -72,7 +72,7 @@ async fn chain_too_long() {
         .expect("failed to extend")
         .audience(Did::key([0xde; 33]))
         .command(["nil"])
-        .sign(&key_signer)
+        .sign(&*key_signer)
         .await
         .expect("failed to build third");
 
@@ -119,10 +119,10 @@ async fn invalid_audience_invocation() {
 
 #[tokio::test]
 async fn invalid_signature() {
-    let key = keypair();
     let root_signer = root_signer();
+    let subject_did = signer().did().clone();
 
-    let envelope = delegation(&key).command(["nil"]).sign(&root_signer).await.expect("failed to build");
+    let envelope = delegation(subject_did).command(["nil"]).sign(&*root_signer).await.expect("failed to build");
 
     let token = envelope.unvalidate().encode();
     let (base, signature) = token.rsplit_once(".").unwrap();
@@ -156,15 +156,15 @@ async fn invalid_audience_delegation() {
 
 #[tokio::test]
 async fn missing_proof() {
-    let key = keypair();
     let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
+    let key_signer = signer();
+    let key_did = *key_signer.did();
 
     // Build chain
-    let first = delegation(&key)
+    let first = delegation(key_did)
         .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&root_signer)
+        .audience(key_did)
+        .sign(&*root_signer)
         .await
         .expect("failed to build first");
 
@@ -172,7 +172,7 @@ async fn missing_proof() {
         .expect("failed to extend")
         .audience(Did::key([0xde; 33]))
         .command(["nil"])
-        .sign(&key_signer)
+        .sign(&*key_signer)
         .await
         .expect("failed to build second");
 
@@ -207,17 +207,17 @@ async fn need_invocation() {
 
 #[tokio::test]
 async fn proofs_must_be_delegations() {
-    let key = keypair();
     let root_signer = root_signer();
-    let subject = key.to_did(DidMethod::Key);
+    let subject_signer = signer();
+    let subject = *subject_signer.did();
 
     // Root is an invocation
     let root_invocation = InvocationBuilder::new()
         .arguments(json!({"bar": 1337}))
         .subject(subject)
-        .audience(key.to_did(DidMethod::Key))
+        .audience(subject)
         .command(["nil"])
-        .sign(&root_signer)
+        .sign(&*root_signer)
         .await
         .expect("failed to build root invocation");
 
@@ -229,23 +229,19 @@ async fn proofs_must_be_delegations() {
 
 #[tokio::test]
 async fn root_key_signature_missing() {
-    let key = keypair();
-    let key_signer = key.signer(DidMethod::Key);
+    let key_signer = signer();
+    let key_did = *key_signer.did();
 
     // First delegation signed by non-root key
-    let first = delegation(&key)
-        .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .sign(&key_signer)
-        .await
-        .expect("failed to build first");
+    let first =
+        delegation(key_did).command(["nil"]).audience(key_did).sign(&*key_signer).await.expect("failed to build first");
 
     // Second delegation
     let second = DelegationBuilder::extending(first)
         .expect("failed to extend")
         .audience(Did::key([0xde; 33]))
         .command(["nil"])
-        .sign(&key_signer)
+        .sign(&*key_signer)
         .await
         .expect("failed to build second");
 
@@ -254,16 +250,17 @@ async fn root_key_signature_missing() {
 
 #[tokio::test]
 async fn subject_not_in_chain() {
-    let subject_key = keypair();
-    let other_key = keypair();
+    let subject_signer = signer();
+    let subject_did = *subject_signer.did();
+    let other_signer = signer();
+    let other_did = *other_signer.did();
     let root_signer = root_signer();
-    let other_signer = other_key.signer(DidMethod::Key);
 
     // Root delegation with subject_key as subject
-    let first = delegation(&subject_key)
+    let first = delegation(subject_did)
         .command(["nil"])
-        .audience(other_key.to_did(DidMethod::Key))
-        .sign(&root_signer)
+        .audience(other_did)
+        .sign(&*root_signer)
         .await
         .expect("failed to build first");
 
@@ -272,7 +269,7 @@ async fn subject_not_in_chain() {
         .expect("failed to extend")
         .audience(Did::key([0xde; 33]))
         .command(["nil"])
-        .sign(&other_signer)
+        .sign(&*other_signer)
         .await
         .expect("failed to build second");
 
@@ -281,21 +278,20 @@ async fn subject_not_in_chain() {
 
 #[tokio::test]
 async fn valid_token() {
-    let subject_key = keypair();
-    let invocation_key = keypair();
     let root_signer = root_signer();
-    let subject_signer = subject_key.signer(DidMethod::Key);
-    let invocation_signer = invocation_key.signer(DidMethod::Key);
-    let subject = subject_key.to_did(DidMethod::Key);
+    let subject_signer = signer();
+    let subject_did = *subject_signer.did();
+    let invocation_signer = signer();
+    let invocation_did = *invocation_signer.did();
     let rpc_did = Did::key([0xaa; 33]);
 
     // Root delegation with policies
     let root = DelegationBuilder::new()
         .policies(vec![policy::op::eq(".args.foo", json!(42)), policy::op::eq("$.req.bar", json!(1337))])
-        .subject(subject)
-        .audience(subject)
+        .subject(subject_did)
+        .audience(subject_did)
         .command(["nil"])
-        .sign(&root_signer)
+        .sign(&*root_signer)
         .await
         .expect("failed to build root");
 
@@ -303,9 +299,9 @@ async fn valid_token() {
     let intermediate = DelegationBuilder::extending(root)
         .expect("failed to extend")
         .policy(policy::op::eq(".args.bar", json!(1337)))
-        .audience(invocation_key.to_did(DidMethod::Key))
+        .audience(invocation_did)
         .command(["nil", "bar"])
-        .sign(&subject_signer)
+        .sign(&*subject_signer)
         .await
         .expect("failed to build intermediate");
 
@@ -314,7 +310,7 @@ async fn valid_token() {
         .arguments(json!({"foo": 42, "bar": 1337}))
         .audience(rpc_did)
         .command(["nil", "bar", "foo"])
-        .sign(&invocation_signer)
+        .sign(&*invocation_signer)
         .await
         .expect("failed to build invocation");
 
@@ -324,11 +320,11 @@ async fn valid_token() {
     let ValidatedNucToken { token, proofs } =
         Asserter::new(parameters).with_context(context).assert_success(invocation.unvalidate());
 
-    assert_eq!(token.issuer, invocation_key.to_did(DidMethod::Key));
+    assert_eq!(token.issuer, invocation_did);
 
     // Ensure the order is right
-    assert_eq!(proofs[0].issuer, subject);
-    assert_eq!(proofs[1].issuer, ROOT_KEYPAIR.to_did(DidMethod::Key));
+    assert_eq!(proofs[0].issuer, subject_did);
+    assert_eq!(proofs[1].issuer, *ROOT_SIGNER.did());
 }
 
 #[tokio::test]
@@ -350,16 +346,15 @@ async fn valid_revocation_token() {
 
 #[tokio::test]
 async fn valid_no_root_keys_needed() {
-    let subject_key = keypair();
-    let subject_signer = subject_key.signer(DidMethod::Key);
-    let subject = subject_key.to_did(DidMethod::Key);
+    let subject_signer = signer();
+    let subject_did = *subject_signer.did();
 
     // Self-signed delegation
     let delegation = DelegationBuilder::new()
-        .subject(subject)
-        .audience(subject)
+        .subject(subject_did)
+        .audience(subject_did)
         .command(["nil"])
-        .sign(&subject_signer)
+        .sign(&*subject_signer)
         .await
         .expect("failed to build");
 
@@ -369,10 +364,10 @@ async fn valid_no_root_keys_needed() {
 
 #[tokio::test]
 async fn valid_root_token() {
-    let key = keypair();
     let root_signer = root_signer();
+    let subject_did = signer().did().clone();
 
-    let delegation = delegation(&key).command(["nil"]).sign(&root_signer).await.expect("failed to build");
+    let delegation = delegation(subject_did).command(["nil"]).sign(&*root_signer).await.expect("failed to build");
 
     Asserter::default().assert_success(delegation.unvalidate());
 }

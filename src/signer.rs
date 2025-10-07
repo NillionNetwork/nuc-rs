@@ -12,6 +12,7 @@ use crate::{
 use async_trait::async_trait;
 use ethers::signers::Signer as EthersSigner;
 use ethers::types::transaction::eip712::{EIP712Domain, TypedData};
+use k256::SecretKey;
 use k256::ecdsa::{Signature, SigningKey};
 use signature::Signer as _;
 use std::collections::BTreeMap;
@@ -31,7 +32,7 @@ pub enum DidMethod {
 
 /// A Nuc token signer.
 #[async_trait]
-pub trait Signer {
+pub trait NucSigner: Send + Sync {
     /// The DID of this signer.
     fn did(&self) -> &Did;
 
@@ -49,6 +50,7 @@ pub enum SigningError {
 }
 
 /// A signer that uses a local `secp256k1` key.
+#[derive(Clone)]
 pub struct Secp256k1Signer {
     key: SigningKey,
     did: Did,
@@ -76,10 +78,31 @@ impl Secp256k1Signer {
         };
         Self { key, did, header }
     }
+
+    /// Generates a new, random `Secp256k1Signer`.
+    #[allow(deprecated)]
+    pub(crate) fn generate(method: DidMethod) -> Self {
+        let secret_key = SecretKey::random(&mut rand::thread_rng());
+        let signing_key: SigningKey = secret_key.into();
+        Self::new(signing_key, method)
+    }
+
+    /// Creates a `Secp256k1Signer` from a 32-byte secret key.
+    #[allow(deprecated)]
+    pub(crate) fn from_bytes(bytes: &[u8; 32], method: DidMethod) -> Self {
+        let secret_key = SecretKey::from_slice(bytes).expect("invalid key length");
+        let signing_key: SigningKey = secret_key.into();
+        Self::new(signing_key, method)
+    }
+
+    /// Returns the raw 33-byte compressed public key.
+    pub fn public_key(&self) -> [u8; 33] {
+        self.key.verifying_key().to_sec1_bytes().deref().try_into().unwrap()
+    }
 }
 
 #[async_trait]
-impl Signer for Secp256k1Signer {
+impl NucSigner for Secp256k1Signer {
     fn did(&self) -> &Did {
         &self.did
     }
@@ -106,7 +129,7 @@ pub struct Eip712Signer<S: EthersSigner> {
 
 impl<S: EthersSigner> Eip712Signer<S> {
     /// Create a new Eip-712 signer.
-    pub fn new(domain: EIP712Domain, signer: S) -> Self {
+    pub(crate) fn new(domain: EIP712Domain, signer: S) -> Self {
         let address: [u8; 20] = signer.address().into();
         let did = Did::ethr(address);
         Self { did, domain, signer }
@@ -114,7 +137,7 @@ impl<S: EthersSigner> Eip712Signer<S> {
 }
 
 #[async_trait]
-impl<S: EthersSigner + Send + Sync> Signer for Eip712Signer<S> {
+impl<S: EthersSigner + Send + Sync> NucSigner for Eip712Signer<S> {
     fn did(&self) -> &Did {
         &self.did
     }
@@ -183,6 +206,58 @@ impl<S: EthersSigner + Send + Sync> Signer for Eip712Signer<S> {
     }
 }
 
+/// A factory for creating Nuc signers.
+pub struct Signer;
+
+impl Signer {
+    /// Generates a new, random `secp256k1` signer.
+    #[allow(deprecated)]
+    pub fn generate(method: DidMethod) -> Box<dyn NucSigner> {
+        Box::new(Secp256k1Signer::generate(method))
+    }
+
+    /// Creates a `secp256k1` signer from a 32-byte private key.
+    #[allow(deprecated)]
+    pub fn from_private_key(bytes: &[u8; 32], method: DidMethod) -> Box<dyn NucSigner> {
+        Box::new(Secp256k1Signer::from_bytes(bytes, method))
+    }
+
+    /// Creates a new Eip-712 signer from an ethers-compatible signer.
+    pub fn from_ethers_signer<S: EthersSigner + Send + Sync + 'static>(
+        domain: EIP712Domain,
+        signer: S,
+    ) -> Box<dyn NucSigner> {
+        Box::new(Eip712Signer::new(domain, signer))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(deprecated)]
+    fn signer_did_matches_creation_method() {
+        // Test did:key
+        let signer_key = Secp256k1Signer::generate(DidMethod::Key);
+        let did_from_signer = signer_key.did();
+        assert!(matches!(did_from_signer, Did::Key { .. }));
+
+        if let Did::Key { public_key } = did_from_signer {
+            assert_eq!(*public_key, signer_key.public_key());
+        }
+
+        // Test did:nil
+        let signer_nil = Secp256k1Signer::new(signer_key.key.clone(), DidMethod::Nil);
+        let did_from_signer_nil = signer_nil.did();
+        assert!(matches!(did_from_signer_nil, Did::Nil { .. }));
+
+        if let Did::Nil { public_key } = did_from_signer_nil {
+            assert_eq!(*public_key, signer_nil.public_key());
+        }
+    }
+}
+
 #[cfg(test)]
 mod eip712_tests {
     use super::*;
@@ -202,7 +277,7 @@ mod eip712_tests {
 
         let wallet = LocalWallet::new(&mut rand::thread_rng());
         let address: [u8; 20] = wallet.address().into();
-        let signer = Eip712Signer::new(domain.clone(), wallet);
+        let signer = Signer::from_ethers_signer(domain.clone(), wallet);
 
         let aud_did = Did::ethr(address);
         let sub_did = Did::ethr(address);
@@ -212,7 +287,7 @@ mod eip712_tests {
             .audience(aud_did)
             .subject(sub_did)
             .command(&[] as &[&str])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("failed to build delegation nuc");
 
@@ -227,7 +302,7 @@ mod eip712_tests {
             .audience(aud_did)
             .subject(sub_did)
             .command(&[] as &[&str])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("failed to build invocation nuc");
 

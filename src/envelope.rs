@@ -396,20 +396,19 @@ pub(crate) fn from_base64(input: &str) -> Result<Vec<u8>, base64::DecodeError> {
 mod tests {
     use super::*;
     use crate::builder::DelegationBuilder;
-    use crate::{builder::to_base64, did::Did, keypair::Keypair, policy, signer::DidMethod};
+    use crate::{Signer, builder::to_base64, did::Did, policy, signer::DidMethod};
     use rstest::rstest;
     use serde_json::json;
 
     #[tokio::test]
     async fn decoding() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let encoded = DelegationBuilder::new()
             .policy(policy::op::eq(".foo", json!(42)))
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
         let envelope = NucTokenEnvelope::decode(&encoded).expect("decode failed");
@@ -418,14 +417,13 @@ mod tests {
 
     #[tokio::test]
     async fn invalid_signature() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let token = DelegationBuilder::new()
             .policy(policy::op::eq(".foo", json!(42)))
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
         let (base, signature) = token.rsplit_once(".").unwrap();
@@ -458,13 +456,12 @@ mod tests {
 
     #[tokio::test]
     async fn nuc_serde() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let encoded = DelegationBuilder::new()
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
 
@@ -498,8 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn deep_nesting() {
-        let keypair = Keypair::generate();
-        let signer = keypair.signer(DidMethod::Key);
+        let signer = Signer::generate(DidMethod::Key);
         let mut policy = policy::op::eq(".foo", json!(42));
         for _ in 0..128 {
             policy = policy::op::not(policy);
@@ -509,7 +505,7 @@ mod tests {
             .audience(Did::key([0xbb; 33]))
             .subject(Did::key([0xcc; 33]))
             .command(["nil", "db", "read"])
-            .sign_and_serialize(&signer)
+            .sign_and_serialize(&*signer)
             .await
             .expect("build failed");
         let err = NucTokenEnvelope::decode(&encoded).expect_err("decode succeeded");

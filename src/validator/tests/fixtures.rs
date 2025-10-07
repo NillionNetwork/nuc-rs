@@ -2,8 +2,7 @@ use crate::{
     builder::{DelegationBuilder, InvocationBuilder},
     did::Did,
     envelope::NucTokenEnvelope,
-    keypair::Keypair,
-    signer::{DidMethod, Secp256k1Signer},
+    signer::{DidMethod, NucSigner, Secp256k1Signer, Signer},
     validator::{
         NucValidator, TimeProvider, ValidatedNucToken, ValidationParameters,
         error::{ValidationError, ValidationKind},
@@ -14,7 +13,7 @@ use serde::Serialize;
 use serde_with::{DisplayFromStr, serde_as};
 use std::{collections::HashMap, env, sync::LazyLock};
 
-pub(crate) static ROOT_KEYPAIR: LazyLock<Keypair> = LazyLock::new(Keypair::generate);
+pub(crate) static ROOT_SIGNER: LazyLock<Secp256k1Signer> = LazyLock::new(|| Secp256k1Signer::generate(DidMethod::Key));
 
 pub(crate) enum TimeConfig {
     System,
@@ -41,7 +40,7 @@ impl Asserter {
     pub fn new(parameters: ValidationParameters) -> Self {
         Self {
             parameters,
-            root_keys: vec![ROOT_KEYPAIR.public_key()],
+            root_keys: vec![ROOT_SIGNER.public_key()],
             context: Default::default(),
             time_config: TimeConfig::System,
             log_assertions: env::var("NUC_VALIDATOR_LOG_ASSERTIONS") == Ok("1".to_string()),
@@ -165,24 +164,24 @@ pub(crate) enum AssertionExpectation {
     },
 }
 
-pub(crate) fn keypair() -> Keypair {
-    Keypair::generate()
+pub(crate) fn signer() -> Box<dyn NucSigner> {
+    Signer::generate(DidMethod::Key)
 }
 
-pub(crate) fn root_signer() -> Secp256k1Signer {
-    ROOT_KEYPAIR.signer(DidMethod::Key)
+pub(crate) fn root_signer() -> Box<dyn NucSigner> {
+    Box::new(ROOT_SIGNER.clone())
 }
 
 // Create a delegation with the most common fields already set so we don't need to deal
 // with them in every single test.
-pub(crate) fn delegation(subject: &Keypair) -> DelegationBuilder {
-    DelegationBuilder::new().audience(Did::key([0xde; 33])).subject(subject.to_did(DidMethod::Key))
+pub(crate) fn delegation(subject_did: Did) -> DelegationBuilder {
+    DelegationBuilder::new().audience(Did::key([0xde; 33])).subject(subject_did)
 }
 
 // Same as the above but for invocations
 #[allow(dead_code)]
-pub(crate) fn invocation(subject: &Keypair) -> InvocationBuilder {
-    InvocationBuilder::new().audience(Did::key([0xde; 33])).subject(subject.to_did(DidMethod::Key))
+pub(crate) fn invocation(subject_did: Did) -> InvocationBuilder {
+    InvocationBuilder::new().audience(Did::key([0xde; 33])).subject(subject_did)
 }
 
 use crate::envelope::SignaturesValidated;
@@ -196,20 +195,17 @@ where
     F: FnOnce(DelegationBuilder) -> DelegationBuilder,
     G: FnOnce(DelegationBuilder) -> DelegationBuilder,
 {
-    let key = keypair();
     let root_signer = root_signer();
-    let key_signer = key.signer(DidMethod::Key);
+    let subject_signer = signer();
+    let subject_did = *subject_signer.did();
 
     // Build the root delegation with sensible defaults
-    let root_builder = DelegationBuilder::new()
-        .command(["nil"])
-        .audience(key.to_did(DidMethod::Key))
-        .subject(key.to_did(DidMethod::Key));
+    let root_builder = DelegationBuilder::new().command(["nil"]).audience(subject_did).subject(subject_did);
 
     // Apply test-specific modifications to the root
     let root_builder = root_modifier(root_builder);
 
-    let root = root_builder.sign(&root_signer).await.expect("failed to build root delegation");
+    let root = root_builder.sign(&*root_signer).await.expect("failed to build root delegation");
 
     // Build the second delegation extending the root
     let second_builder = DelegationBuilder::extending(root)
@@ -220,7 +216,7 @@ where
     // Apply test-specific modifications to the second token
     let second_builder = second_modifier(second_builder);
 
-    second_builder.sign(&key_signer).await.expect("failed to build second delegation")
+    second_builder.sign(&*subject_signer).await.expect("failed to build second delegation")
 }
 
 /// Builds a standard two-token chain (`root delegation -> invocation`).
@@ -232,10 +228,9 @@ where
     F: FnOnce(DelegationBuilder) -> DelegationBuilder,
     G: FnOnce(InvocationBuilder) -> InvocationBuilder,
 {
-    let subject_key = keypair();
     let root_signer = root_signer();
-    let subject_signer = subject_key.signer(DidMethod::Key);
-    let subject_did = subject_key.to_did(DidMethod::Key);
+    let subject_signer = signer();
+    let subject_did = *subject_signer.did();
 
     // Build the root delegation with sensible defaults
     let root_builder = DelegationBuilder::new().command(["nil"]).audience(subject_did).subject(subject_did);
@@ -243,7 +238,7 @@ where
     // Apply test-specific modifications to the delegation
     let root_builder = delegation_modifier(root_builder);
 
-    let root_delegation = root_builder.sign(&root_signer).await.expect("failed to build root delegation");
+    let root_delegation = root_builder.sign(&*root_signer).await.expect("failed to build root delegation");
 
     // Build the invocation extending the delegation
     let invocation_builder = InvocationBuilder::extending(root_delegation)
@@ -253,5 +248,5 @@ where
     // Apply test-specific modifications to the invocation
     let invocation_builder = invocation_modifier(invocation_builder);
 
-    invocation_builder.sign(&subject_signer).await.expect("failed to build invocation")
+    invocation_builder.sign(&*subject_signer).await.expect("failed to build invocation")
 }

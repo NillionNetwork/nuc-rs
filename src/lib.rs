@@ -8,7 +8,7 @@
 //!
 //! The primary entry points for using this crate are:
 //!
-//! *   [`Keypair`]: For generating and managing cryptographic identities.
+//! *   [`Signer`]: For generating and managing cryptographic identities.
 //! *   [`DelegationBuilder`] and [`InvocationBuilder`]: For constructing delegation and invocation tokens.
 //! *   [`NucTokenEnvelope`]: For decoding and handling token chains.
 //! *   [`NucValidator`]: For verifying the integrity and permissions of a token chain.
@@ -21,20 +21,19 @@
 //! use nillion_nucs::{
 //!     builder::DelegationBuilder,
 //!     did::Did,
-//!     keypair::Keypair,
-//!     signer::DidMethod,
+//!     signer::{DidMethod, Signer},
 //! };
 //!
 //! async fn build_token() {
-//!     let keypair = Keypair::generate();
-//!     let signer = keypair.signer(DidMethod::Key);
-//!     let audience_did = Keypair::generate().to_did(DidMethod::Key);
+//!     let signer = Signer::generate(DidMethod::Key);
+//!     let audience_signer = Signer::generate(DidMethod::Key);
+//!     let audience_did = audience_signer.did().clone();
 //!
 //!     let token_string = DelegationBuilder::new()
 //!         .audience(audience_did.clone())
 //!         .subject(audience_did)
 //!         .command(["admin", "god-mode"])
-//!         .sign_and_serialize(&signer)
+//!         .sign_and_serialize(&*signer)
 //!         .await
 //!         .unwrap();
 //!
@@ -46,12 +45,12 @@
 //! [`InvocationBuilder`]: builder::InvocationBuilder
 //! [`NucTokenEnvelope`]: envelope::NucTokenEnvelope
 //! [`NucValidator`]: validator::NucValidator
+//! [`Signer`]: signer::Signer
 extern crate core;
 
 pub mod builder;
 pub mod did;
 pub mod envelope;
-pub mod keypair;
 pub mod policy;
 pub mod selector;
 pub mod signer;
@@ -59,5 +58,4 @@ pub mod token;
 pub mod validator;
 
 pub use k256;
-pub use keypair::Keypair;
-pub use signer::{DidMethod, Secp256k1Signer, Signer};
+pub use signer::{DidMethod, NucSigner, Secp256k1Signer, Signer};
